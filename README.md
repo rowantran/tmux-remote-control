@@ -4,7 +4,7 @@
 
 Type prompts with no network latency while the complete, unmodified Pi TUI runs in tmux on a remote machine.
 
-- `pi-prompt` runs locally, opens your local editor, and injects completed prompts through SSH.
+- `pi-prompt` runs locally, provides an inline readline prompt, and injects completed prompts through SSH.
 - `/remote-control` runs inside remote Pi, identifies its exact tmux pane, and copies the local control command through tmux using OSC 52.
 - tmux remains the only input multiplexer. Normal attached-terminal input and injected prompts both enter the same pane PTY.
 
@@ -79,7 +79,13 @@ The extension:
 5. Copies the command to the attached local terminal clipboard through tmux/OSC 52.
 6. Displays the command in the Pi transcript as a fallback.
 
-Paste the copied command into a local terminal. Your local editor opens. Save and exit to submit the prompt. A fresh editor opens for the next prompt. Save an empty file or quit without saving to stop.
+Paste the copied command into a local terminal. Type at the zero-latency local prompt and press Enter to submit:
+
+```text
+> hello
+```
+
+Press `Ctrl-G` to open the current draft in your configured local editor; save and exit the editor to submit it. Press `Ctrl-D` at an empty prompt to stop. With `--loop`, pressing Enter on an empty prompt simply shows another prompt.
 
 After the host has been remembered, every pane and future Pi session for that remote user can use:
 
@@ -95,9 +101,17 @@ Change the global host at any time by supplying a different value:
 
 Older pane-scoped `@pi_prompt_host` values are automatically migrated when no global host has been saved yet.
 
-## Local editor
+## Local prompt and editor
 
-`pi-prompt` uses the first configured value:
+The default input is a local readline prompt. It supports normal line editing and uses these additional controls:
+
+- `Enter`: submit
+- `Ctrl-G`: open the current draft in the external editor, then submit it when the editor exits
+- `Ctrl-D`: exit
+
+Use `--editor` to skip the inline prompt and open the external editor immediately.
+
+The external editor is selected from the first configured value:
 
 1. `PI_PROMPT_EDITOR`
 2. `VISUAL`
@@ -109,6 +123,7 @@ Examples:
 ```bash
 PI_PROMPT_EDITOR=nvim pi-prompt devbox %12 --loop
 PI_PROMPT_EDITOR='code --wait' pi-prompt devbox %12 --loop
+pi-prompt devbox %12 --editor
 ```
 
 ## Pane discovery without `/remote-control`

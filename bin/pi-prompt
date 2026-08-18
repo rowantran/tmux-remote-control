@@ -10,9 +10,10 @@ Usage:
   pi-prompt HOST --mark PANE
   pi-prompt HOST --unmark PANE
 
-Compose a prompt in a local editor, then paste and submit it to a remote tmux
-pane. If PANE is omitted, a pane marked with tmux option @pi_prompt=1 is used.
-If several panes match, pi-prompt opens a local selector.
+Compose a prompt locally, then paste and submit it to a remote tmux pane.
+The default is an inline `> ` prompt; press Ctrl-G to edit the current draft in
+an external editor. If PANE is omitted, a pane marked with tmux option
+@pi_prompt=1 is used. If several panes match, pi-prompt opens a local selector.
 
 Environment:
   PI_PROMPT_HOST      Default SSH host or SSH config alias
@@ -20,8 +21,13 @@ Environment:
   PI_PROMPT_EDITOR    Editor command; falls back to VISUAL, EDITOR, then vi
 
 Options:
-  --loop              Open a fresh local editor after every submitted prompt;
-                      save an empty file or quit without saving to stop
+  --loop              Show another local prompt after every submission
+  --editor            Open the external editor immediately instead of `> `
+
+At the inline prompt:
+  Enter               Submit the current line
+  Ctrl-G              Open the current draft in the external editor
+  Ctrl-D              Exit
 
 Mark the current pane from a shell inside the remote tmux pane:
   tmux set-option -p @pi_prompt 1
@@ -38,6 +44,7 @@ target="${PI_PROMPT_TARGET:-}"
 action="compose"
 action_target=""
 loop="false"
+editor_first="false"
 
 while (($# > 0)); do
   case "$1" in
@@ -57,6 +64,10 @@ while (($# > 0)); do
       ;;
     --loop)
       loop="true"
+      shift
+      ;;
+    --editor)
+      editor_first="true"
       shift
       ;;
     --mark)
@@ -208,10 +219,40 @@ fi
 validate_target "$target"
 
 editor="${PI_PROMPT_EDITOR:-${VISUAL:-${EDITOR:-vi}}}"
+editor_marker="__PI_PROMPT_EDITOR_$$__"
+if [[ "$editor_first" != "true" ]]; then
+  # This macro works with macOS's Bash 3.2, unlike READLINE_LINE in a bind -x
+  # callback. It accepts the line with a private prefix; the loop strips that
+  # prefix, opens the editor with the current draft, then submits the result.
+  set -o emacs
+  bind "\"\\C-g\":\"\\C-a${editor_marker}\\C-j\""
+fi
+
 while :; do
   prompt_file="$(mktemp "$temp_root/pi-prompt.XXXXXX")"
-  /bin/sh -c "$editor \"\$1\"" sh "$prompt_file" || die "editor exited unsuccessfully"
+
+  if [[ "$editor_first" == "true" ]]; then
+    /bin/sh -c "$editor \"\$1\"" sh "$prompt_file" || die "editor exited unsuccessfully"
+  else
+    draft=""
+    if ! IFS= read -e -r -p "> " draft </dev/tty; then
+      exit 0
+    fi
+
+    if [[ "$draft" == "$editor_marker"* ]]; then
+      printf '%s' "${draft#"$editor_marker"}" >"$prompt_file"
+      /bin/sh -c "$editor \"\$1\"" sh "$prompt_file" || die "editor exited unsuccessfully"
+    else
+      printf '%s' "$draft" >"$prompt_file"
+    fi
+  fi
+
   if [[ ! -s "$prompt_file" ]]; then
+    if [[ "$loop" == "true" && "$editor_first" != "true" ]]; then
+      rm -f "$prompt_file"
+      prompt_file=""
+      continue
+    fi
     exit 0
   fi
 
@@ -236,5 +277,4 @@ NODE
   rm -f "$prompt_file"
   prompt_file=""
   [[ "$loop" == "true" ]] || exit 0
-  printf 'Opening a fresh local prompt editor; leave it empty to stop.\n'
 done
