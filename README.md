@@ -105,11 +105,15 @@ Older pane-scoped `@pi_prompt_host` values are automatically migrated when no gl
 
 The default input is a local readline prompt. It supports normal line editing and uses these additional controls:
 
-- `Enter`: submit
+- `Enter`: submit and immediately clear the local input row
 - `Ctrl-G`: open the current draft in the external editor, then submit it when the editor exits
 - `Ctrl-D`: exit
 
 Use `--editor` to skip the inline prompt and open the external editor immediately.
+
+`pi-prompt` establishes an SSH control connection while discovering the target pane and reuses that authenticated connection for every submission. This avoids repeated SSH key exchange and authentication. The control connection and its private socket are closed when `pi-prompt` exits.
+
+There is still at least one network round trip between pressing Enter and Pi receiving the text. The input row is cleared before that network operation starts, so local feedback remains immediate. Remaining delay is normally remote network RTT plus the small tmux paste operation.
 
 The external editor is selected from the first configured value:
 

@@ -130,14 +130,21 @@ if [[ ! -d "$temp_root" || ! -w "$temp_root" ]]; then
   temp_root="/tmp"
 fi
 pane_file="$(mktemp "$temp_root/pi-prompt-panes.XXXXXX")"
+control_dir="$(mktemp -d "$temp_root/pi-prompt-ssh.XXXXXX")"
+control_path="$control_dir/control"
+ssh_args=(-o ControlMaster=auto -o ControlPersist=10m -o "ControlPath=$control_path")
 prompt_file=""
 cleanup() {
+  # The first SSH operation becomes a temporary master, making every prompt
+  # submission reuse the authenticated connection instead of reconnecting.
+  ssh -o "ControlPath=$control_path" -O exit "$host" >/dev/null 2>&1 || true
   rm -f "$pane_file"
   [[ -z "$prompt_file" ]] || rm -f "$prompt_file"
+  rm -rf "$control_dir"
 }
 trap cleanup EXIT
 
-ssh -T "$host" \
+ssh "${ssh_args[@]}" -T "$host" \
   "tmux list-panes -a -F '#{pane_id}|#{@pi_prompt}|#{session_name}:#{window_index}.#{pane_index}|#{pane_current_command}|#{pane_title}'" \
   >"$pane_file" || die "could not list tmux panes on $host"
 
@@ -230,8 +237,10 @@ fi
 
 while :; do
   prompt_file="$(mktemp "$temp_root/pi-prompt.XXXXXX")"
+  trim_editor_newline="false"
 
   if [[ "$editor_first" == "true" ]]; then
+    trim_editor_newline="true"
     /bin/sh -c "$editor \"\$1\"" sh "$prompt_file" || die "editor exited unsuccessfully"
   else
     draft=""
@@ -239,7 +248,12 @@ while :; do
       exit 0
     fi
 
+    # Enter leaves readline on the following row. Move back and erase the
+    # submitted prompt before doing any network work so the UI responds at once.
+    printf '\033[1A\r\033[2K' >/dev/tty
+
     if [[ "$draft" == "$editor_marker"* ]]; then
+      trim_editor_newline="true"
       printf '%s' "${draft#"$editor_marker"}" >"$prompt_file"
       /bin/sh -c "$editor \"\$1\"" sh "$prompt_file" || die "editor exited unsuccessfully"
     else
@@ -259,9 +273,10 @@ while :; do
   buffer_name="pi-prompt-$$-${RANDOM:-0}"
   remote_command="tmux load-buffer -b '$buffer_name' -; tmux paste-buffer -p -r -d -b '$buffer_name' -t '$target'; tmux send-keys -t '$target' Enter"
 
-  # Editors normally add one final linefeed. Remove only that final linefeed
-  # while preserving all intentional multiline content.
-  node - "$prompt_file" <<'NODE' | ssh -T "$host" "$remote_command"
+  if [[ "$trim_editor_newline" == "true" ]]; then
+    # Editors normally add one final linefeed. Remove only that final linefeed
+    # while preserving all intentional multiline content.
+    node - "$prompt_file" <<'NODE' | ssh "${ssh_args[@]}" -T "$host" "$remote_command"
 const fs = require("node:fs");
 let content = fs.readFileSync(process.argv[2]);
 if (content.length > 0 && content[content.length - 1] === 0x0a) {
@@ -272,9 +287,16 @@ if (content.length > 0 && content[content.length - 1] === 0x0a) {
 }
 process.stdout.write(content);
 NODE
+  else
+    # The common inline path already has no trailing linefeed and avoids
+    # starting Node, keeping submission overhead to one multiplexed SSH call.
+    ssh "${ssh_args[@]}" -T "$host" "$remote_command" <"$prompt_file"
+  fi
 
-  printf 'Submitted prompt to %s:%s\n' "$host" "$target"
   rm -f "$prompt_file"
   prompt_file=""
-  [[ "$loop" == "true" ]] || exit 0
+  if [[ "$loop" != "true" ]]; then
+    printf 'Submitted prompt to %s:%s\n' "$host" "$target"
+    exit 0
+  fi
 done

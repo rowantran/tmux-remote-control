@@ -8,7 +8,17 @@ mkdir -p "$root/bin"
 cat >"$root/bin/ssh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-command="${3:-}"
+previous=""
+for argument in "$@"; do
+  if [[ "$previous" == "-O" && "$argument" == "exit" ]]; then
+    exit 0
+  fi
+  previous="$argument"
+done
+if [[ -n "${PI_PROMPT_TEST_SSH_ARGS:-}" ]]; then
+  printf '%s\n' "$@" >"$PI_PROMPT_TEST_SSH_ARGS"
+fi
+command="${!#}"
 if [[ "$command" == *"list-panes"* ]]; then
   printf '%%7|1|work:0.0|node|pi - project\n'
   exit 0
@@ -31,6 +41,7 @@ export PATH="$root/bin:$PATH"
 export PI_PROMPT_EDITOR="$root/bin/editor"
 export PI_PROMPT_TEST_COMMAND="$root/command"
 export PI_PROMPT_TEST_INPUT="$root/input"
+export PI_PROMPT_TEST_SSH_ARGS="$root/ssh-args"
 
 script="$(cd "$(dirname "$0")/.." && pwd)/bin/pi-prompt"
 "$script" example-host %7 --editor >"$root/output"
@@ -39,6 +50,9 @@ grep -F "paste-buffer -p -r -d" "$root/command" >/dev/null
 grep -F -- "-t '%7'" "$root/command" >/dev/null
 [[ "$(cat "$root/input")" == $'first line\nsecond line' ]]
 grep -F "Submitted prompt to example-host:%7" "$root/output" >/dev/null
+grep -F "ControlMaster=auto" "$root/ssh-args" >/dev/null
+grep -F "ControlPersist=10m" "$root/ssh-args" >/dev/null
+grep -F "ControlPath=" "$root/ssh-args" >/dev/null
 
 run_in_pty() {
   PI_PROMPT_TEST_KEYS="$1" python3 - "$script" <<'PY'
@@ -84,6 +98,9 @@ else:
 if not sent:
     sys.stderr.buffer.write(output)
     raise SystemExit("inline prompt was not displayed")
+if b"\x1b[1A\r\x1b[2K" not in output:
+    sys.stderr.buffer.write(output)
+    raise SystemExit("submitted inline prompt was not cleared")
 PY
 }
 
