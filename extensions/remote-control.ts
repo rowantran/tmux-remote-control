@@ -1,10 +1,13 @@
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { join } from "node:path";
+import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 
 const ENTRY_TYPE = "pi-tmux-remote-control";
-const HOST_OPTION = "@pi_prompt_host";
+const LEGACY_PANE_HOST_OPTION = "@pi_prompt_host";
 const MARK_OPTION = "@pi_prompt";
+const CONFIG_FILENAME = "pi-tmux-remote-control.json";
 
 interface CommandEntry {
   command: string;
@@ -17,6 +20,38 @@ function shellQuote(value: string): string {
 
 function validHost(value: string): boolean {
   return value.length > 0 && !value.startsWith("-") && !/[\s\u0000-\u001f]/.test(value);
+}
+
+function configPath(agentDir: string): string {
+  return join(agentDir, CONFIG_FILENAME);
+}
+
+export async function loadGlobalHost(agentDir = getAgentDir()): Promise<string | undefined> {
+  try {
+    const parsed = JSON.parse(await readFile(configPath(agentDir), "utf8")) as { host?: unknown };
+    return typeof parsed.host === "string" && validHost(parsed.host) ? parsed.host : undefined;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw new Error(
+      `Could not read global remote-control settings: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+export async function saveGlobalHost(host: string, agentDir = getAgentDir()): Promise<void> {
+  if (!validHost(host)) throw new Error(`Invalid SSH host: ${host}`);
+
+  await mkdir(agentDir, { recursive: true });
+  const path = configPath(agentDir);
+  const temporaryPath = `${path}.${process.pid}.tmp`;
+  try {
+    await writeFile(temporaryPath, `${JSON.stringify({ host }, null, 2)}\n`, { mode: 0o600 });
+    await rename(temporaryPath, path);
+  } catch (error) {
+    throw new Error(
+      `Could not save global remote-control settings: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
 
 function normalizedTty(value: string): string | undefined {
@@ -119,7 +154,7 @@ export default function remoteControlExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("remote-control", {
-    description: "Copy a local pi-prompt command for this remote tmux pane: /remote-control [ssh-host]",
+    description: "Copy a pi-prompt command; an optional SSH host is remembered globally",
     handler: async (args, ctx) => {
       if (ctx.mode !== "tui") {
         ctx.ui.notify("/remote-control must run in the remote interactive Pi TUI.", "error");
@@ -142,12 +177,24 @@ export default function remoteControlExtension(pi: ExtensionAPI): void {
       }
 
       try {
-        if (requestedHost) await setPaneOption(pi, pane, HOST_OPTION, requestedHost);
         await setPaneOption(pi, pane, MARK_OPTION, "1");
 
-        const rememberedHost = await paneOption(pi, pane, HOST_OPTION);
-        const host = requestedHost || rememberedHost || process.env.PI_REMOTE_CONTROL_HOST || hostname();
+        const globalHost = await loadGlobalHost();
+        const legacyPaneHost = globalHost
+          ? undefined
+          : await paneOption(pi, pane, LEGACY_PANE_HOST_OPTION);
+        const host =
+          requestedHost ||
+          globalHost ||
+          legacyPaneHost ||
+          process.env.PI_REMOTE_CONTROL_HOST ||
+          hostname();
         if (!validHost(host)) throw new Error(`Could not determine a valid SSH host: ${host}`);
+
+        // An explicit argument updates the global value. Also migrate the old
+        // pane-scoped value (or another fallback) the first time this version runs.
+        const savedGlobalHost = Boolean(requestedHost) || !globalHost;
+        if (savedGlobalHost) await saveGlobalHost(host);
 
         const command = `pi-prompt --host ${shellQuote(host)} --target ${shellQuote(pane)} --loop`;
         await setPaneOption(pi, pane, "@pi_prompt_command", command);
@@ -162,7 +209,7 @@ export default function remoteControlExtension(pi: ExtensionAPI): void {
         pi.appendEntry(ENTRY_TYPE, { command, copied } satisfies CommandEntry);
         if (copied) {
           ctx.ui.notify(
-            `Copied the local control command for tmux pane ${pane}. Paste it into a local terminal.`,
+            `Copied the local control command for tmux pane ${pane}.${savedGlobalHost ? ` Remembered ${host} globally.` : ""} Paste it into a local terminal.`,
             "info",
           );
         } else {

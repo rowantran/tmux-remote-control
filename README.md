@@ -69,7 +69,7 @@ The extension:
 
 1. Reads the exact pane id from `TMUX_PANE`, or matches Pi's controlling TTY against tmux's pane TTY when a launcher such as `isara pi run` has scrubbed the tmux environment variables.
 2. Marks that pane with `@pi_prompt=1`.
-3. Remembers `devbox` on the pane as `@pi_prompt_host`.
+3. Remembers `devbox` globally in `~/.pi/agent/pi-tmux-remote-control.json` (or the directory selected by `PI_CODING_AGENT_DIR`).
 4. Builds a command such as:
 
    ```bash
@@ -81,11 +81,19 @@ The extension:
 
 Paste the copied command into a local terminal. Your local editor opens. Save and exit to submit the prompt. A fresh editor opens for the next prompt. Save an empty file or quit without saving to stop.
 
-After the host has been remembered on that pane, use:
+After the host has been remembered, every pane and future Pi session for that remote user can use:
 
 ```text
 /remote-control
 ```
+
+Change the global host at any time by supplying a different value:
+
+```text
+/remote-control new-devbox
+```
+
+Older pane-scoped `@pi_prompt_host` values are automatically migrated when no global host has been saved yet.
 
 ## Local editor
 
