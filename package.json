@@ -21,7 +21,7 @@
   },
   "scripts": {
     "check": "bash -n bin/pi-prompt && tsc --noEmit",
-    "test": "bash test/pi-prompt.test.sh",
+    "test": "bash test/pi-prompt.test.sh && node --experimental-strip-types test/remote-control.test.mjs",
     "verify": "npm run check && npm test"
   },
   "peerDependencies": {

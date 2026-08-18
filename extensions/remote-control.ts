@@ -19,6 +19,53 @@ function validHost(value: string): boolean {
   return value.length > 0 && !value.startsWith("-") && !/[\s\u0000-\u001f]/.test(value);
 }
 
+function normalizedTty(value: string): string | undefined {
+  const tty = value.trim().replace(/^\/dev\//, "");
+  return tty && tty !== "?" && tty !== "??" ? tty : undefined;
+}
+
+/** Resolve the current tmux pane even when a launcher such as Isara scrubs TMUX_PANE. */
+export async function resolveTmuxPane(
+  pi: ExtensionAPI,
+  envPane = process.env.TMUX_PANE,
+  pid = process.pid,
+): Promise<string | undefined> {
+  if (envPane && /^%[0-9]+$/.test(envPane)) return envPane;
+
+  const psResult = await pi.exec("ps", ["-o", "tty=", "-p", String(pid)]);
+  const processTty = psResult.code === 0 ? normalizedTty(psResult.stdout) : undefined;
+  if (!processTty) return undefined;
+
+  // With TMUX unset, this queries the user's default tmux server. That is the
+  // normal server used by `tmux new-session`, including sessions launching Isara.
+  const panesResult = await pi.exec("tmux", [
+    "list-panes",
+    "-a",
+    "-F",
+    "#{pane_id}|#{pane_tty}",
+  ]);
+  if (panesResult.code !== 0) return undefined;
+
+  const matches = panesResult.stdout
+    .trim()
+    .split("\n")
+    .map((line) => {
+      const separator = line.indexOf("|");
+      if (separator === -1) return undefined;
+      return {
+        pane: line.slice(0, separator),
+        tty: normalizedTty(line.slice(separator + 1)),
+      };
+    })
+    .filter(
+      (candidate): candidate is { pane: string; tty: string } =>
+        candidate !== undefined && /^%[0-9]+$/.test(candidate.pane) && candidate.tty !== undefined,
+    )
+    .filter((candidate) => candidate.tty === processTty);
+
+  return matches.length === 1 ? matches[0]?.pane : undefined;
+}
+
 async function paneOption(pi: ExtensionAPI, pane: string, option: string): Promise<string | undefined> {
   const result = await pi.exec("tmux", ["show-options", "-p", "-v", "-t", pane, option]);
   return result.code === 0 && result.stdout.trim() ? result.stdout.trim() : undefined;
@@ -79,9 +126,12 @@ export default function remoteControlExtension(pi: ExtensionAPI): void {
         return;
       }
 
-      const pane = process.env.TMUX_PANE;
-      if (!pane || !/^%[0-9]+$/.test(pane)) {
-        ctx.ui.notify("/remote-control requires Pi to be running inside tmux.", "error");
+      const pane = await resolveTmuxPane(pi);
+      if (!pane) {
+        ctx.ui.notify(
+          "/remote-control could not identify Pi's tmux pane. Pi must run in a pane on the default tmux server.",
+          "error",
+        );
         return;
       }
 

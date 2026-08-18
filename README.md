@@ -67,7 +67,7 @@ Inside Pi, run this once with the SSH host or local SSH config alias:
 
 The extension:
 
-1. Reads the exact pane id from `TMUX_PANE`.
+1. Reads the exact pane id from `TMUX_PANE`, or matches Pi's controlling TTY against tmux's pane TTY when a launcher such as `isara pi run` has scrubbed the tmux environment variables.
 2. Marks that pane with `@pi_prompt=1`.
 3. Remembers `devbox` on the pane as `@pi_prompt_host`.
 4. Builds a command such as:
@@ -160,6 +160,8 @@ Check that Pi is in tmux:
 ```bash
 printf '%s\n' "$TMUX_PANE"
 ```
+
+An empty value is expected under launchers such as `isara pi run`; `/remote-control` then identifies the pane by matching Pi's controlling TTY. This fallback expects the session to use the default tmux server (the normal `tmux new-session` behavior).
 
 If OSC 52 is blocked, `/remote-control` still displays the full command. Copy it manually.
 
