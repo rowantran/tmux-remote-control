@@ -35,21 +35,9 @@ The remote machine does not need the `pi-prompt` executable, although installing
 
 ## Isara tmux environment forwarding
 
-The extension needs the pane identifier but does not need access to tmux's control socket. Start Isara with its narrow opt-in environment forwarding:
+The extension needs the pane identifier but does not need access to tmux's control socket. When launched inside tmux, current versions of `isara pi run` automatically forward only `TMUX` and `TMUX_PANE`. Outside tmux, those variables remain absent.
 
-```bash
-isara pi run --forward-tmux
-```
-
-This forwards only `TMUX` and `TMUX_PANE`; it does not grant the sandbox access to the tmux Unix socket or other panes. If you previously added a tmux path to `network.allowUnixSockets` in `security_profile.json`, remove it.
-
-To make the opt-in personal and keep the normal `isara pi run` command, add this to your remote shell configuration:
-
-```bash
-export ISARA_PI_FORWARD_TMUX=1
-```
-
-With that variable set, `isara pi run` fails clearly when invoked outside tmux rather than silently launching without a pane identifier.
+This does not grant the sandbox access to the tmux Unix socket or other panes. If you previously added a tmux path to `network.allowUnixSockets` in `security_profile.json`, remove it.
 
 ## tmux clipboard setup
 
@@ -74,7 +62,7 @@ Start normal Pi in remote tmux:
 ```bash
 ssh -t devbox
 cd /srv/project
-tmux new-session -A -s pi 'isara pi run --forward-tmux'
+tmux new-session -A -s pi 'isara pi run'
 ```
 
 Inside Pi, run this once with the SSH host or local SSH config alias:
@@ -203,7 +191,7 @@ Check that Pi is in tmux:
 printf '%s\n' "$TMUX_PANE"
 ```
 
-If this is empty inside Pi, restart it with `isara pi run --forward-tmux` or set `ISARA_PI_FORWARD_TMUX=1` before launching. The extension intentionally does not connect to the tmux control socket as a fallback.
+If this is empty inside Pi, update Isara and restart `isara pi run` from inside tmux. The extension intentionally does not connect to the tmux control socket as a fallback.
 
 If OSC 52 is blocked, `/remote-control` still displays the full command. Copy it manually.
 

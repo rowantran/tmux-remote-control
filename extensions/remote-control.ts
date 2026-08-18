@@ -84,7 +84,7 @@ export default function remoteControlExtension(pi: ExtensionAPI): void {
       const pane = resolveTmuxPane();
       if (!pane) {
         ctx.ui.notify(
-          "/remote-control needs TMUX_PANE. Launch with `isara pi run --forward-tmux` or set ISARA_PI_FORWARD_TMUX=1.",
+          "/remote-control needs TMUX_PANE. Run Pi inside tmux with an Isara version that forwards tmux context.",
           "error",
         );
         return;
