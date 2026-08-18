@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, readlink, rename, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -12,6 +12,11 @@ const CONFIG_FILENAME = "pi-tmux-remote-control.json";
 interface CommandEntry {
   command: string;
   copied: boolean;
+}
+
+export interface TmuxContext {
+  pane: string;
+  socket?: string;
 }
 
 function shellQuote(value: string): string {
@@ -59,29 +64,53 @@ function normalizedTty(value: string): string | undefined {
   return tty && tty !== "?" && tty !== "??" ? tty : undefined;
 }
 
-/** Resolve the current tmux pane even when a launcher such as Isara scrubs TMUX_PANE. */
-export async function resolveTmuxPane(
-  pi: ExtensionAPI,
-  envPane = process.env.TMUX_PANE,
-  pid = process.pid,
-): Promise<string | undefined> {
-  if (envPane && /^%[0-9]+$/.test(envPane)) return envPane;
+function tmuxSocketFromEnvironment(value = process.env.TMUX): string | undefined {
+  if (!value) return undefined;
+  const socket = value.split(",", 1)[0]?.trim();
+  return socket?.startsWith("/") ? socket : undefined;
+}
+
+function tmuxArgs(socket: string | undefined, args: string[]): string[] {
+  return socket ? ["-S", socket, ...args] : args;
+}
+
+async function processTty(pi: ExtensionAPI, pid: number): Promise<string | undefined> {
+  // Reading our own fd avoids relying on `ps`, which may report `?` from
+  // inside a sandbox even though stdin is still the tmux pane PTY.
+  if (pid === process.pid) {
+    for (const fdPath of ["/proc/self/fd/0", "/dev/fd/0"]) {
+      try {
+        const tty = normalizedTty(await readlink(fdPath));
+        if (tty?.startsWith("pts/") || tty?.startsWith("tty")) return tty;
+      } catch {
+        // Try the portable ps fallback below.
+      }
+    }
+  }
 
   const psResult = await pi.exec("ps", ["-o", "tty=", "-p", String(pid)]);
-  const processTty = psResult.code === 0 ? normalizedTty(psResult.stdout) : undefined;
-  if (!processTty) return undefined;
+  return psResult.code === 0 ? normalizedTty(psResult.stdout) : undefined;
+}
 
-  // With TMUX unset, this queries the user's default tmux server. That is the
-  // normal server used by `tmux new-session`, including sessions launching Isara.
-  const panesResult = await pi.exec("tmux", [
-    "list-panes",
-    "-a",
-    "-F",
-    "#{pane_id}|#{pane_tty}",
-  ]);
-  if (panesResult.code !== 0) return undefined;
+async function discoverTmuxSockets(): Promise<string[]> {
+  const getuid = process.getuid;
+  if (!getuid) return [];
 
-  const matches = panesResult.stdout
+  const roots = new Set([process.env.TMPDIR, "/tmp"].filter((root): root is string => Boolean(root)));
+  const sockets: string[] = [];
+  for (const root of roots) {
+    const directory = join(root, `tmux-${getuid()}`);
+    try {
+      for (const entry of await readdir(directory)) sockets.push(join(directory, entry));
+    } catch {
+      // This root has no tmux sockets or is unavailable inside the sandbox.
+    }
+  }
+  return [...new Set(sockets)];
+}
+
+function matchingPane(stdout: string, tty: string): string | undefined {
+  const matches = stdout
     .trim()
     .split("\n")
     .map((line) => {
@@ -96,37 +125,92 @@ export async function resolveTmuxPane(
       (candidate): candidate is { pane: string; tty: string } =>
         candidate !== undefined && /^%[0-9]+$/.test(candidate.pane) && candidate.tty !== undefined,
     )
-    .filter((candidate) => candidate.tty === processTty);
+    .filter((candidate) => candidate.tty === tty);
 
   return matches.length === 1 ? matches[0]?.pane : undefined;
 }
 
-async function paneOption(pi: ExtensionAPI, pane: string, option: string): Promise<string | undefined> {
-  const result = await pi.exec("tmux", ["show-options", "-p", "-v", "-t", pane, option]);
+/** Resolve the current pane and server even when a launcher scrubs TMUX/TMUX_PANE. */
+export async function resolveTmuxContext(
+  pi: ExtensionAPI,
+  envPane = process.env.TMUX_PANE,
+  pid = process.pid,
+): Promise<TmuxContext | undefined> {
+  if (envPane && /^%[0-9]+$/.test(envPane)) {
+    const socket = tmuxSocketFromEnvironment();
+    return socket ? { pane: envPane, socket } : { pane: envPane };
+  }
+
+  const tty = await processTty(pi, pid);
+  if (!tty) return undefined;
+
+  const listArgs = ["list-panes", "-a", "-F", "#{pane_id}|#{pane_tty}"];
+  const defaultResult = await pi.exec("tmux", listArgs);
+  if (defaultResult.code === 0) {
+    const pane = matchingPane(defaultResult.stdout, tty);
+    if (pane) return { pane };
+  }
+
+  for (const socket of await discoverTmuxSockets()) {
+    const result = await pi.exec("tmux", tmuxArgs(socket, listArgs));
+    if (result.code !== 0) continue;
+    const pane = matchingPane(result.stdout, tty);
+    if (pane) return { pane, socket };
+  }
+
+  return undefined;
+}
+
+/** Backward-compatible pane-only resolver used by integrations and tests. */
+export async function resolveTmuxPane(
+  pi: ExtensionAPI,
+  envPane = process.env.TMUX_PANE,
+  pid = process.pid,
+): Promise<string | undefined> {
+  return (await resolveTmuxContext(pi, envPane, pid))?.pane;
+}
+
+async function paneOption(
+  pi: ExtensionAPI,
+  tmux: TmuxContext,
+  option: string,
+): Promise<string | undefined> {
+  const result = await pi.exec(
+    "tmux",
+    tmuxArgs(tmux.socket, ["show-options", "-p", "-v", "-t", tmux.pane, option]),
+  );
   return result.code === 0 && result.stdout.trim() ? result.stdout.trim() : undefined;
 }
 
-async function setPaneOption(pi: ExtensionAPI, pane: string, option: string, value: string): Promise<void> {
-  const result = await pi.exec("tmux", ["set-option", "-p", "-t", pane, option, value]);
+async function setPaneOption(
+  pi: ExtensionAPI,
+  tmux: TmuxContext,
+  option: string,
+  value: string,
+): Promise<void> {
+  const result = await pi.exec(
+    "tmux",
+    tmuxArgs(tmux.socket, ["set-option", "-p", "-t", tmux.pane, option, value]),
+  );
   if (result.code !== 0) throw new Error(result.stderr.trim() || `Could not set tmux option ${option}`);
 }
 
-async function activeClientForPane(pi: ExtensionAPI, pane: string): Promise<string | undefined> {
-  const sessionResult = await pi.exec("tmux", [
-    "display-message",
-    "-p",
-    "-t",
-    pane,
-    "#{session_name}",
-  ]);
+async function activeClientForPane(pi: ExtensionAPI, tmux: TmuxContext): Promise<string | undefined> {
+  const sessionResult = await pi.exec(
+    "tmux",
+    tmuxArgs(tmux.socket, ["display-message", "-p", "-t", tmux.pane, "#{session_name}"]),
+  );
   if (sessionResult.code !== 0) return undefined;
   const session = sessionResult.stdout.trim();
 
-  const clientsResult = await pi.exec("tmux", [
-    "list-clients",
-    "-F",
-    "#{client_name}|#{client_session}|#{client_activity}",
-  ]);
+  const clientsResult = await pi.exec(
+    "tmux",
+    tmuxArgs(tmux.socket, [
+      "list-clients",
+      "-F",
+      "#{client_name}|#{client_session}|#{client_activity}",
+    ]),
+  );
   if (clientsResult.code !== 0) return undefined;
 
   return clientsResult.stdout
@@ -161,14 +245,15 @@ export default function remoteControlExtension(pi: ExtensionAPI): void {
         return;
       }
 
-      const pane = await resolveTmuxPane(pi);
-      if (!pane) {
+      const tmux = await resolveTmuxContext(pi);
+      if (!tmux) {
         ctx.ui.notify(
-          "/remote-control could not identify Pi's tmux pane. Pi must run in a pane on the default tmux server.",
+          "/remote-control could not match Pi's stdin TTY to a tmux pane. Pi must be running directly inside tmux.",
           "error",
         );
         return;
       }
+      const { pane } = tmux;
 
       const requestedHost = args.trim();
       if (requestedHost && !validHost(requestedHost)) {
@@ -177,12 +262,12 @@ export default function remoteControlExtension(pi: ExtensionAPI): void {
       }
 
       try {
-        await setPaneOption(pi, pane, MARK_OPTION, "1");
+        await setPaneOption(pi, tmux, MARK_OPTION, "1");
 
         const globalHost = await loadGlobalHost();
         const legacyPaneHost = globalHost
           ? undefined
-          : await paneOption(pi, pane, LEGACY_PANE_HOST_OPTION);
+          : await paneOption(pi, tmux, LEGACY_PANE_HOST_OPTION);
         const host =
           requestedHost ||
           globalHost ||
@@ -197,13 +282,13 @@ export default function remoteControlExtension(pi: ExtensionAPI): void {
         if (savedGlobalHost) await saveGlobalHost(host);
 
         const command = `pi-prompt --host ${shellQuote(host)} --target ${shellQuote(pane)} --loop`;
-        await setPaneOption(pi, pane, "@pi_prompt_command", command);
+        await setPaneOption(pi, tmux, "@pi_prompt_command", command);
 
-        const targetClient = await activeClientForPane(pi, pane);
+        const targetClient = await activeClientForPane(pi, tmux);
         const copyArgs = ["set-buffer", "-w"];
         if (targetClient) copyArgs.push("-t", targetClient);
         copyArgs.push(command);
-        const copyResult = await pi.exec("tmux", copyArgs);
+        const copyResult = await pi.exec("tmux", tmuxArgs(tmux.socket, copyArgs));
         const copied = copyResult.code === 0;
 
         pi.appendEntry(ENTRY_TYPE, { command, copied } satisfies CommandEntry);
