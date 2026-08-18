@@ -33,6 +33,36 @@ pi install "$PWD"
 
 The remote machine does not need the `pi-prompt` executable, although installing it does no harm.
 
+## Isara sandbox socket permission
+
+`isara pi run` uses a sandbox that denies Unix sockets by default, including tmux's control socket. Configure the permission for your remote user without changing Isara's defaults for anyone else.
+
+From a normal remote shell **inside the tmux pane, before starting Isara**, print the exact socket path:
+
+```bash
+printf '%s\n' "${TMUX%%,*}"
+```
+
+Add that exact path to `~/security_profile.json` on the remote machine. For example:
+
+```json
+{
+  "network": {
+    "allowUnixSockets": [
+      "/tmp/tmux-1000/default"
+    ]
+  }
+}
+```
+
+If the file already exists, merge `allowUnixSockets` into its existing `network` object rather than replacing the file. Isara merges this user-owned override into its built-in `git` profile; it does not alter defaults for other users. The allowlist requires an exact path and does not accept a wildcard.
+
+A nearer `security_profile.json` in the current repository or one of its subdirectories takes precedence over the home-level file. In that case, add the socket to that effective file locally and do not commit the user-specific path.
+
+Restart `isara pi run` after editing the profile. `/reload` is insufficient because the sandbox policy is fixed when Pi starts.
+
+Allowing the tmux socket lets sandboxed Pi processes interact with that tmux server, including its other panes. Only add the exact socket for the server you intend to control.
+
 ## tmux clipboard setup
 
 On the remote machine, put this in `~/.tmux.conf`:

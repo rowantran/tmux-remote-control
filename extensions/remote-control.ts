@@ -248,7 +248,7 @@ export default function remoteControlExtension(pi: ExtensionAPI): void {
       const tmux = await resolveTmuxContext(pi);
       if (!tmux) {
         ctx.ui.notify(
-          "/remote-control could not match Pi's stdin TTY to a tmux pane. Pi must be running directly inside tmux.",
+          "/remote-control could not access or match Pi's tmux pane. Under isara pi run, allow the exact tmux Unix socket in your security_profile.json; see the package README.",
           "error",
         );
         return;
