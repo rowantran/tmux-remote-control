@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  pi-prompt HOST [PANE]
+  pi-prompt --host HOST [--target PANE] [--loop]
+  pi-prompt HOST --list
+  pi-prompt HOST --mark PANE
+  pi-prompt HOST --unmark PANE
+
+Compose a prompt in a local editor, then paste and submit it to a remote tmux
+pane. If PANE is omitted, a pane marked with tmux option @pi_prompt=1 is used.
+If several panes match, pi-prompt opens a local selector.
+
+Environment:
+  PI_PROMPT_HOST      Default SSH host or SSH config alias
+  PI_PROMPT_TARGET    Default tmux target
+  PI_PROMPT_EDITOR    Editor command; falls back to VISUAL, EDITOR, then vi
+
+Options:
+  --loop              Open a fresh local editor after every submitted prompt;
+                      save an empty file or quit without saving to stop
+
+Mark the current pane from a shell inside the remote tmux pane:
+  tmux set-option -p @pi_prompt 1
+EOF
+}
+
+die() {
+  printf 'pi-prompt: %s\n' "$*" >&2
+  exit 1
+}
+
+host="${PI_PROMPT_HOST:-}"
+target="${PI_PROMPT_TARGET:-}"
+action="compose"
+action_target=""
+loop="false"
+
+while (($# > 0)); do
+  case "$1" in
+    --host)
+      (($# >= 2)) || die "--host requires a value"
+      host="$2"
+      shift 2
+      ;;
+    --target)
+      (($# >= 2)) || die "--target requires a value"
+      target="$2"
+      shift 2
+      ;;
+    --list)
+      action="list"
+      shift
+      ;;
+    --loop)
+      loop="true"
+      shift
+      ;;
+    --mark)
+      (($# >= 2)) || die "--mark requires a pane target"
+      action="mark"
+      action_target="$2"
+      shift 2
+      ;;
+    --unmark)
+      (($# >= 2)) || die "--unmark requires a pane target"
+      action="unmark"
+      action_target="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      die "unknown option: $1"
+      ;;
+    *)
+      if [[ -z "$host" ]]; then
+        host="$1"
+      elif [[ -z "$target" ]]; then
+        target="$1"
+      else
+        die "unexpected argument: $1"
+      fi
+      shift
+      ;;
+  esac
+done
+
+[[ -n "$host" ]] || die "SSH host is required (argument, --host, or PI_PROMPT_HOST)"
+[[ "$host" != -* && "$host" != *[[:space:]]* ]] || die "invalid SSH host: $host"
+
+validate_target() {
+  [[ "$1" =~ ^[%A-Za-z0-9_.:-]+$ ]] || die "invalid tmux target: $1"
+}
+
+if [[ "$action" == "mark" || "$action" == "unmark" ]]; then
+  validate_target "$action_target"
+  if [[ "$action" == "mark" ]]; then
+    ssh -T "$host" \
+      "tmux set-option -p -t '$action_target' @pi_prompt 1 && tmux display-message -p -t '$action_target' 'marked #{session_name}:#{window_index}.#{pane_index} (#{pane_id}) for pi-prompt'"
+  else
+    ssh -T "$host" \
+      "tmux set-option -p -u -t '$action_target' @pi_prompt 2>/dev/null || true; tmux display-message -p -t '$action_target' 'unmarked #{session_name}:#{window_index}.#{pane_index} (#{pane_id})'"
+  fi
+  exit 0
+fi
+
+temp_root="${PI_PROMPT_TMPDIR:-${TMPDIR:-/tmp}}"
+if [[ ! -d "$temp_root" || ! -w "$temp_root" ]]; then
+  temp_root="/tmp"
+fi
+pane_file="$(mktemp "$temp_root/pi-prompt-panes.XXXXXX")"
+prompt_file=""
+cleanup() {
+  rm -f "$pane_file"
+  [[ -z "$prompt_file" ]] || rm -f "$prompt_file"
+}
+trap cleanup EXIT
+
+ssh -T "$host" \
+  "tmux list-panes -a -F '#{pane_id}|#{@pi_prompt}|#{session_name}:#{window_index}.#{pane_index}|#{pane_current_command}|#{pane_title}'" \
+  >"$pane_file" || die "could not list tmux panes on $host"
+
+pane_ids=()
+pane_marked=()
+pane_labels=()
+while IFS='|' read -r pane_id marker location command title; do
+  [[ "$pane_id" =~ ^%[0-9]+$ ]] || continue
+  pane_ids+=("$pane_id")
+  if [[ "$marker" == "1" ]]; then
+    pane_marked+=("1")
+    marker_text="*"
+  else
+    pane_marked+=("0")
+    marker_text=" "
+  fi
+  pane_labels+=("$pane_id\t$marker_text $location\t$command\t$title")
+done <"$pane_file"
+
+((${#pane_ids[@]} > 0)) || die "no tmux panes found on $host"
+
+if [[ "$action" == "list" ]]; then
+  printf 'PANE\t  LOCATION\tCOMMAND\tTITLE\n'
+  printf '%b\n' "${pane_labels[@]}"
+  exit 0
+fi
+
+choose_indexes=()
+if [[ -z "$target" ]]; then
+  for ((i = 0; i < ${#pane_ids[@]}; i++)); do
+    [[ "${pane_marked[$i]}" == "1" ]] && choose_indexes+=("$i")
+  done
+
+  if ((${#choose_indexes[@]} == 0)); then
+    # With no explicit marker, prefer panes whose current command or title looks
+    # like Pi/Isara. Fall back to all panes when the match is ambiguous.
+    for ((i = 0; i < ${#pane_ids[@]}; i++)); do
+      label="${pane_labels[$i]}"
+      if [[ "$label" =~ [Pp][Ii] || "$label" =~ [Ii][Ss][Aa][Rr][Aa] ]]; then
+        choose_indexes+=("$i")
+      fi
+    done
+  fi
+  if ((${#choose_indexes[@]} == 0)); then
+    for ((i = 0; i < ${#pane_ids[@]}; i++)); do
+      choose_indexes+=("$i")
+    done
+  fi
+
+  if ((${#choose_indexes[@]} == 1)); then
+    target="${pane_ids[${choose_indexes[0]}]}"
+  else
+    choices="$(mktemp "$temp_root/pi-prompt-choices.XXXXXX")"
+    trap 'rm -f "$pane_file" "$choices"; [[ -z "$prompt_file" ]] || rm -f "$prompt_file"' EXIT
+    for index in "${choose_indexes[@]}"; do
+      printf '%b\n' "${pane_labels[$index]}" >>"$choices"
+    done
+
+    if command -v fzf >/dev/null 2>&1; then
+      selected="$(fzf --prompt='remote Pi pane> ' --height=~40% --reverse <"$choices")" || exit 0
+      target="${selected%%$'\t'*}"
+    else
+      printf 'Select a remote pane:\n' >/dev/tty
+      n=1
+      while IFS= read -r choice; do
+        printf '  %d) %b\n' "$n" "$choice" >/dev/tty
+        n=$((n + 1))
+      done <"$choices"
+      printf '> ' >/dev/tty
+      IFS= read -r selected_number </dev/tty
+      [[ "$selected_number" =~ ^[0-9]+$ ]] || die "invalid selection"
+      ((selected_number >= 1 && selected_number <= ${#choose_indexes[@]})) || die "selection out of range"
+      selected_index="${choose_indexes[$((selected_number - 1))]}"
+      target="${pane_ids[$selected_index]}"
+    fi
+  fi
+fi
+
+validate_target "$target"
+
+editor="${PI_PROMPT_EDITOR:-${VISUAL:-${EDITOR:-vi}}}"
+while :; do
+  prompt_file="$(mktemp "$temp_root/pi-prompt.XXXXXX")"
+  /bin/sh -c "$editor \"\$1\"" sh "$prompt_file" || die "editor exited unsuccessfully"
+  if [[ ! -s "$prompt_file" ]]; then
+    exit 0
+  fi
+
+  buffer_name="pi-prompt-$$-${RANDOM:-0}"
+  remote_command="tmux load-buffer -b '$buffer_name' -; tmux paste-buffer -p -r -d -b '$buffer_name' -t '$target'; tmux send-keys -t '$target' Enter"
+
+  # Editors normally add one final linefeed. Remove only that final linefeed
+  # while preserving all intentional multiline content.
+  node - "$prompt_file" <<'NODE' | ssh -T "$host" "$remote_command"
+const fs = require("node:fs");
+let content = fs.readFileSync(process.argv[2]);
+if (content.length > 0 && content[content.length - 1] === 0x0a) {
+  content = content.subarray(0, content.length - 1);
+  if (content.length > 0 && content[content.length - 1] === 0x0d) {
+    content = content.subarray(0, content.length - 1);
+  }
+}
+process.stdout.write(content);
+NODE
+
+  printf 'Submitted prompt to %s:%s\n' "$host" "$target"
+  rm -f "$prompt_file"
+  prompt_file=""
+  [[ "$loop" == "true" ]] || exit 0
+  printf 'Opening a fresh local prompt editor; leave it empty to stop.\n'
+done
