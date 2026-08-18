@@ -33,48 +33,36 @@ pi install "$PWD"
 
 The remote machine does not need the `pi-prompt` executable, although installing it does no harm.
 
-## Isara sandbox socket permission
+## Isara tmux environment forwarding
 
-`isara pi run` uses a sandbox that denies Unix sockets by default, including tmux's control socket. Configure the permission for your remote user without changing Isara's defaults for anyone else.
-
-From a normal remote shell **inside the tmux pane, before starting Isara**, print the exact socket path:
+The extension needs the pane identifier but does not need access to tmux's control socket. Start Isara with its narrow opt-in environment forwarding:
 
 ```bash
-printf '%s\n' "${TMUX%%,*}"
+isara pi run --forward-tmux
 ```
 
-Add that exact path to `~/security_profile.json` on the remote machine. For example:
+This forwards only `TMUX` and `TMUX_PANE`; it does not grant the sandbox access to the tmux Unix socket or other panes. If you previously added a tmux path to `network.allowUnixSockets` in `security_profile.json`, remove it.
 
-```json
-{
-  "network": {
-    "allowUnixSockets": [
-      "/tmp/tmux-1000/default"
-    ]
-  }
-}
+To make the opt-in personal and keep the normal `isara pi run` command, add this to your remote shell configuration:
+
+```bash
+export ISARA_PI_FORWARD_TMUX=1
 ```
 
-If the file already exists, merge `allowUnixSockets` into its existing `network` object rather than replacing the file. Isara merges this user-owned override into its built-in `git` profile; it does not alter defaults for other users. The allowlist requires an exact path and does not accept a wildcard.
-
-A nearer `security_profile.json` in the current repository or one of its subdirectories takes precedence over the home-level file. In that case, add the socket to that effective file locally and do not commit the user-specific path.
-
-Restart `isara pi run` after editing the profile. `/reload` is insufficient because the sandbox policy is fixed when Pi starts.
-
-Allowing the tmux socket lets sandboxed Pi processes interact with that tmux server, including its other panes. Only add the exact socket for the server you intend to control.
+With that variable set, `isara pi run` fails clearly when invoked outside tmux rather than silently launching without a pane identifier.
 
 ## tmux clipboard setup
 
 On the remote machine, put this in `~/.tmux.conf`:
 
 ```tmux
-set -g set-clipboard external
+set -g set-clipboard on
 ```
 
 Restart the remote tmux server after changing it, or apply it to the running server:
 
 ```bash
-tmux set-option -g set-clipboard external
+tmux set-option -g set-clipboard on
 ```
 
 Your local terminal must support OSC 52 clipboard writes. Ghostty, Kitty, iTerm2, WezTerm, and many current terminals support it. If a local tmux sits between SSH and the terminal, configure its `set-clipboard` option too.
@@ -86,7 +74,7 @@ Start normal Pi in remote tmux:
 ```bash
 ssh -t devbox
 cd /srv/project
-tmux new-session -A -s pi 'isara pi run'
+tmux new-session -A -s pi 'isara pi run --forward-tmux'
 ```
 
 Inside Pi, run this once with the SSH host or local SSH config alias:
@@ -97,17 +85,16 @@ Inside Pi, run this once with the SSH host or local SSH config alias:
 
 The extension:
 
-1. Reads the exact pane id and socket from `TMUX`/`TMUX_PANE`, or directly matches Pi's stdin TTY against every standard tmux server socket when a launcher such as `isara pi run` has scrubbed those variables.
-2. Marks that pane with `@pi_prompt=1`.
-3. Remembers `devbox` globally in `~/.pi/agent/pi-tmux-remote-control.json` (or the directory selected by `PI_CODING_AGENT_DIR`).
-4. Builds a command such as:
+1. Reads the exact pane id from the forwarded `TMUX_PANE` value.
+2. Remembers `devbox` globally in `~/.pi/agent/pi-tmux-remote-control.json` (or the directory selected by `PI_CODING_AGENT_DIR`).
+3. Builds a command such as:
 
    ```bash
    pi-prompt --host 'devbox' --target '%12' --loop
    ```
 
-5. Copies the command to the attached local terminal clipboard through tmux/OSC 52.
-6. Displays the command in the Pi transcript as a fallback.
+4. Copies the command with Pi's built-in OSC 52 clipboard helper.
+5. Displays the command in the Pi transcript as a fallback.
 
 Paste the copied command into a local terminal. Type at the zero-latency local prompt and press Enter to submit:
 
@@ -128,8 +115,6 @@ Change the global host at any time by supplying a different value:
 ```text
 /remote-control new-devbox
 ```
-
-Older pane-scoped `@pi_prompt_host` values are automatically migrated when no global host has been saved yet.
 
 ## Local prompt and editor
 
@@ -218,7 +203,7 @@ Check that Pi is in tmux:
 printf '%s\n' "$TMUX_PANE"
 ```
 
-An empty value is expected under launchers such as `isara pi run`; `/remote-control` then reads Pi's stdin TTY directly and searches the tmux sockets below `$TMPDIR/tmux-$UID` and `/tmp/tmux-$UID`. This supports both the default server and named servers created with `tmux -L`.
+If this is empty inside Pi, restart it with `isara pi run --forward-tmux` or set `ISARA_PI_FORWARD_TMUX=1` before launching. The extension intentionally does not connect to the tmux control socket as a fallback.
 
 If OSC 52 is blocked, `/remote-control` still displays the full command. Copy it manually.
 
