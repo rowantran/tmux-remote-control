@@ -1,5 +1,7 @@
 # pi-tmux-remote-control
 
+## WARNING: this is slop software for personal use. proceed with caution
+
 Type prompts with no network latency while the complete, unmodified Pi TUI runs in tmux on a remote machine.
 
 - `pi-prompt` runs locally, opens your local editor, and injects completed prompts through SSH.
