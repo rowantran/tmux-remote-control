@@ -135,6 +135,7 @@ deadline = time.monotonic() + 10
 sent = False
 after_prompt_keys = os.environ["TMUX_REMOTE_CONTROL_TEST_KEYS_AFTER_PROMPT"]
 sent_after_prompt = not after_prompt_keys
+prompt_marker = b"\x1b[>1u> "
 while time.monotonic() < deadline:
     ready, _, _ = select.select([fd], [], [], 0.1)
     if ready:
@@ -145,10 +146,10 @@ while time.monotonic() < deadline:
         if not chunk:
             break
         output.extend(chunk)
-        if not sent and b"> " in output:
+        if not sent and prompt_marker in output:
             os.write(fd, bytes.fromhex(os.environ["TMUX_REMOTE_CONTROL_TEST_KEYS"]))
             sent = True
-        elif sent and not sent_after_prompt and output.count(b"> ") >= 2:
+        elif sent and not sent_after_prompt and output.count(prompt_marker) >= 2:
             os.write(fd, bytes.fromhex(after_prompt_keys))
             sent_after_prompt = True
     finished, status = os.waitpid(pid, os.WNOHANG)
@@ -165,6 +166,10 @@ else:
 if not sent or not sent_after_prompt:
     sys.stderr.buffer.write(output)
     raise SystemExit("expected inline prompt was not displayed")
+header = b"\x1b[2J\x1b[H[controlling: example-host -> work]\r\n"
+if header not in output:
+    sys.stderr.buffer.write(output)
+    raise SystemExit("controller header was not displayed at the top of a clear screen")
 if b"\x1b[1A\r\x1b[2K" not in output:
     sys.stderr.buffer.write(output)
     raise SystemExit("submitted inline prompt was not cleared")

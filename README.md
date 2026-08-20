@@ -141,9 +141,10 @@ tmux-remote-control attach devbox work --once
 
 ## Local input
 
-Attach mode uses an inline readline prompt:
+Attach mode clears the current terminal screen, shows the remote target at the top, and keeps the inline readline prompt directly below it:
 
 ```text
+[controlling: devbox -> work]
 > type here
 ```
 

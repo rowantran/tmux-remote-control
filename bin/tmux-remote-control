@@ -211,7 +211,8 @@ while (($# > 0)); do
 done
 
 [[ -n "$host" ]] || die "SSH host is required (argument, --host, or TMUX_REMOTE_CONTROL_HOST)"
-[[ "$host" != -* && "$host" != *[[:space:]]* ]] || die "invalid SSH host: $host"
+[[ "$host" != -* && "$host" != *[[:space:]]* && "$host" != *[[:cntrl:]]* ]] || \
+  die "invalid SSH host: $host"
 if [[ "$action" != "compose" ]]; then
   [[ "$explicit_target" != "true" && "$explicit_session" != "true" ]] || \
     die "target options cannot be combined with --$action"
@@ -327,7 +328,7 @@ if [[ -n "$session_target" ]]; then
     "tmux display-message -p -t $quoted_session_target '#{session_id}|#{session_name}'" \
     >"$query_file" || die "could not find tmux session for $session_target on $host"
   IFS='|' read -r session_id session_name <"$query_file" || true
-  [[ "$session_id" =~ ^\$[0-9]+$ && -n "$session_name" ]] || \
+  [[ "$session_id" =~ ^\$[0-9]+$ && -n "$session_name" && "$session_name" != *[[:cntrl:]]* ]] || \
     die "could not find tmux session for $session_target on $host"
 else
   validate_tmux_target "$target"
@@ -336,7 +337,7 @@ else
     "tmux display-message -p -t $quoted_target '#{pane_id}|#{session_name}:#{window_index}.#{pane_index}'" \
     >"$query_file" || die "could not find tmux pane $target on $host"
   IFS='|' read -r pane_id pane_location <"$query_file" || true
-  [[ "$pane_id" =~ ^%[0-9]+$ && -n "$pane_location" ]] || \
+  [[ "$pane_id" =~ ^%[0-9]+$ && -n "$pane_location" && "$pane_location" != *[[:cntrl:]]* ]] || \
     die "could not find tmux pane $target on $host"
 fi
 
@@ -411,6 +412,15 @@ if [[ "$editor_first" != "true" ]]; then
   bind '"\C-\\": abort'
   bind '"\e[92;5u": abort'
   bind_navigation_key "\\e[122;5u" "suspend"
+fi
+
+if [[ "$editor_first" != "true" ]]; then
+  if [[ -n "$session_id" ]]; then
+    controller_target="$session_name"
+  else
+    controller_target="$pane_location"
+  fi
+  printf '\033[2J\033[H[controlling: %s -> %s]\n' "$host" "$controller_target" >/dev/tty
 fi
 
 run_navigation_action() {
