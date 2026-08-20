@@ -349,13 +349,17 @@ if [[ "$editor_first" != "true" ]]; then
   bind "\"\\C-g\":\"\\C-a${editor_marker}\\C-j\""
   bind "\"\\e[103;5u\":\"\\C-a${editor_marker}\\C-j\""
 
+  delete_sentinel_sequence="\\e[999;$$~"
+  bind "\"${delete_sentinel_sequence}\": backward-delete-char"
+
   bind_navigation_key() {
     local key_sequence="$1"
     local key_action="$2"
     local key_macro
-    # Kill and yank the draft across consecutive Readline prompts. Prefixing
-    # it with a space ensures that an empty draft replaces the kill ring too.
-    key_macro="\\C-a \\C-e\\C-u${key_marker}${key_action}\\C-j\\C-y\\C-a\\C-d\\C-e"
+    # Kill and yank the draft across consecutive Readline prompts. Appending a
+    # space ensures that an empty draft replaces the kill ring too. A private
+    # sequence deletes that sentinel without invoking a user-facing shortcut.
+    key_macro="\\C-e \\C-u${key_marker}${key_action}\\C-j\\C-y${delete_sentinel_sequence}"
     bind "\"${key_sequence}\":\"${key_macro}\""
   }
 

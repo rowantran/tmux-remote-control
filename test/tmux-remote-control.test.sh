@@ -211,6 +211,7 @@ run_in_pty "68656c6c6f20776f726c641b5b39383b3375626967200d"
 # draft. CSI-u keeps Ctrl-J and Ctrl-number distinct from Enter and other keys.
 : >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
 while IFS= read -r navigation_key; do
+  printf 'navigation did not return to the prompt' >"$root/input"
   run_in_pty "6b6565702074686973206472616674${navigation_key}0d"
   [[ "$(cat "$root/input")" == "keep this draft" ]]
 done < <(python3 - <<'PY'
