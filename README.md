@@ -151,6 +151,7 @@ Controls:
 
 - `Enter`: submit the current line
 - `Ctrl-G`: open the current draft in an external editor, then submit when the editor exits
+- `Ctrl-F`: toggle zoom for the focused pane
 - `Ctrl-H`: select the pane below
 - `Ctrl-J`: select the pane to the left
 - `Ctrl-K`: select the pane to the right

@@ -38,6 +38,7 @@ Attach options:
 At the inline prompt:
   Enter               Submit the current line
   Ctrl-G              Open the current draft in the external editor
+  Ctrl-F              Toggle zoom for the focused remote pane
   Ctrl-H/J/K/L        Select the remote pane down/left/right/up
   Ctrl-P / Ctrl-N     Select the previous/next remote window
   Ctrl-0 ... Ctrl-9   Select a remote window by index
@@ -373,12 +374,14 @@ if [[ "$editor_first" != "true" ]]; then
   # Legacy control sequences cover terminals without extended-key support.
   # Ctrl-J and Ctrl-number need Kitty keyboard disambiguation because their
   # legacy bytes overlap Enter and other control keys.
+  bind_navigation_key "\\C-f" "pane-zoom"
   bind_navigation_key "\\C-h" "pane-down"
   bind_navigation_key "\\C-k" "pane-right"
   bind_navigation_key "\\C-l" "pane-up"
   bind_navigation_key "\\C-p" "window-previous"
   bind_navigation_key "\\C-n" "window-next"
 
+  bind_navigation_key "\\e[102;5u" "pane-zoom"
   bind_navigation_key "\\e[104;5u" "pane-down"
   bind_navigation_key "\\e[106;5u" "pane-left"
   bind_navigation_key "\\e[107;5u" "pane-right"
@@ -407,6 +410,7 @@ run_navigation_action() {
   fi
 
   case "$key_action" in
+    pane-zoom) navigation_command="tmux resize-pane -Z -t $(shell_quote "$session_id")" ;;
     pane-down) navigation_command="tmux select-pane -t $(shell_quote "$session_id") -D" ;;
     pane-left) navigation_command="tmux select-pane -t $(shell_quote "$session_id") -L" ;;
     pane-right) navigation_command="tmux select-pane -t $(shell_quote "$session_id") -R" ;;

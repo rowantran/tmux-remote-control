@@ -41,7 +41,7 @@ if [[ "$command" == *'#{pane_id}|#{session_name}'* ]]; then
   printf '%%7|work:0.0\n'
   exit 0
 fi
-if [[ "$command" == "tmux select-pane "* || "$command" == "tmux select-window "* ]]; then
+if [[ "$command" == "tmux resize-pane "* || "$command" == "tmux select-pane "* || "$command" == "tmux select-window "* ]]; then
   printf '%s\n' "$command" >>"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
   exit 0
 fi
@@ -182,10 +182,10 @@ run_in_pty "776f726c641b5b39373b357568656c6c6f200d"
 run_in_pty "68656c6c6f20776f726c641b5b39383b3375626967200d"
 [[ "$(cat "$root/input")" == "hello big world" ]]
 
-# Navigation shortcuts run remote tmux commands without submitting the draft.
-# CSI-u keeps Ctrl-J and Ctrl-number distinct from Enter and other Ctrl keys.
+# Navigation and zoom shortcuts run remote tmux commands without submitting the
+# draft. CSI-u keeps Ctrl-J and Ctrl-number distinct from Enter and other keys.
 navigation_keys="$(python3 - <<'PY'
-keys = "hjklpn0123456789"
+keys = "fhjklpn0123456789"
 print(b"".join(f"\x1b[{ord(key)};5u".encode() for key in keys).hex())
 PY
 )"
@@ -193,6 +193,7 @@ PY
 run_in_pty "6b6565702074686973206472616674${navigation_keys}0d"
 [[ "$(cat "$root/input")" == "keep this draft" ]]
 cat >"$root/expected-navigation-commands" <<'EOF'
+tmux resize-pane -Z -t '$3'
 tmux select-pane -t '$3' -D
 tmux select-pane -t '$3' -L
 tmux select-pane -t '$3' -R
