@@ -41,6 +41,10 @@ if [[ "$command" == *'#{pane_id}|#{session_name}'* ]]; then
   printf '%%7|work:0.0\n'
   exit 0
 fi
+if [[ "$command" == "tmux select-pane "* || "$command" == "tmux select-window "* ]]; then
+  printf '%s\n' "$command" >>"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+  exit 0
+fi
 printf '%s\n' "$command" >"$TMUX_REMOTE_CONTROL_TEST_COMMAND"
 cat >"$TMUX_REMOTE_CONTROL_TEST_INPUT"
 SH
@@ -61,6 +65,7 @@ export TMUX_REMOTE_CONTROL_TEST_COMMAND="$root/command"
 export TMUX_REMOTE_CONTROL_TEST_INPUT="$root/input"
 export TMUX_REMOTE_CONTROL_TEST_SSH_ARGS="$root/ssh-args"
 export TMUX_REMOTE_CONTROL_TEST_QUERY_COMMAND="$root/query-command"
+export TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS="$root/navigation-commands"
 
 script="$(cd "$(dirname "$0")/.." && pwd)/bin/tmux-remote-control"
 
@@ -156,6 +161,9 @@ if not sent:
 if b"\x1b[1A\r\x1b[2K" not in output:
     sys.stderr.buffer.write(output)
     raise SystemExit("submitted inline prompt was not cleared")
+if b"\x1b[>1u" not in output or b"\x1b[<u" not in output:
+    sys.stderr.buffer.write(output)
+    raise SystemExit("extended keyboard mode was not enabled and restored")
 PY
 }
 
@@ -167,6 +175,42 @@ run_in_pty "647261667407"
 [[ "$(cat "$root/editor-initial")" == "draft" ]]
 [[ "$(cat "$root/input")" == $'first line\nsecond line' ]]
 unset TMUX_REMOTE_CONTROL_TEST_EDITOR_INITIAL
+
+# Extended keyboard reporting preserves standard Readline Ctrl and Alt editing.
+run_in_pty "776f726c641b5b39373b357568656c6c6f200d"
+[[ "$(cat "$root/input")" == "hello world" ]]
+run_in_pty "68656c6c6f20776f726c641b5b39383b3375626967200d"
+[[ "$(cat "$root/input")" == "hello big world" ]]
+
+# Navigation shortcuts run remote tmux commands without submitting the draft.
+# CSI-u keeps Ctrl-J and Ctrl-number distinct from Enter and other Ctrl keys.
+navigation_keys="$(python3 - <<'PY'
+keys = "hjklpn0123456789"
+print(b"".join(f"\x1b[{ord(key)};5u".encode() for key in keys).hex())
+PY
+)"
+: >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+run_in_pty "6b6565702074686973206472616674${navigation_keys}0d"
+[[ "$(cat "$root/input")" == "keep this draft" ]]
+cat >"$root/expected-navigation-commands" <<'EOF'
+tmux select-pane -t '$3' -D
+tmux select-pane -t '$3' -L
+tmux select-pane -t '$3' -R
+tmux select-pane -t '$3' -U
+tmux select-window -t '$3' -p
+tmux select-window -t '$3' -n
+tmux select-window -t '$3:0'
+tmux select-window -t '$3:1'
+tmux select-window -t '$3:2'
+tmux select-window -t '$3:3'
+tmux select-window -t '$3:4'
+tmux select-window -t '$3:5'
+tmux select-window -t '$3:6'
+tmux select-window -t '$3:7'
+tmux select-window -t '$3:8'
+tmux select-window -t '$3:9'
+EOF
+diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
 
 list_output="$("$script" attach example-host --list)"
 [[ "$list_output" == *'$3'* ]]

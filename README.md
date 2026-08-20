@@ -151,7 +151,17 @@ Controls:
 
 - `Enter`: submit the current line
 - `Ctrl-G`: open the current draft in an external editor, then submit when the editor exits
+- `Ctrl-H`: select the pane below
+- `Ctrl-J`: select the pane to the left
+- `Ctrl-K`: select the pane to the right
+- `Ctrl-L`: select the pane above
+- `Ctrl-P` / `Ctrl-N`: select the previous or next window
+- `Ctrl-0` through `Ctrl-9`: select a window by index
 - `Ctrl-D`: close the controller
+
+Pane and window shortcuts work when the controller follows a session. They keep the current draft at the prompt and use the same SSH control connection as submissions. Fixed-pane mode ignores them and rings the terminal bell because that mode stays pinned to one pane.
+
+The prompt temporarily asks compatible terminals for distinct control-key sequences. This distinction is necessary because traditional terminal input cannot tell some `Ctrl-number` keys apart from other control keys. Unsupported terminals can still use the pane shortcuts except `Ctrl-J`, plus `Ctrl-P` and `Ctrl-N`.
 
 Pressing Enter on an empty prompt shows another prompt. Use `--editor` to open the external editor immediately. Add `--once` with `--editor` if the editor should open only once.
 
