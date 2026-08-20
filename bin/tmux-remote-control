@@ -1,0 +1,390 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  tmux-remote-control [HOST]
+  tmux-remote-control attach HOST [SESSION]
+  tmux-remote-control attach --host HOST [--session SESSION_OR_PANE | --target PANE]
+  tmux-remote-control attach HOST --list
+
+Run `tmux-remote-control [HOST]` inside the remote tmux pane. It copies a local
+controller command containing the SSH host and current tmux session:
+
+  tmux-remote-control attach HOST SESSION
+
+Paste that command into a terminal on the local device. The attach mode shows a
+local input prompt and sends each submission over SSH to the pane currently
+active in the remote session. If SESSION is omitted, attach mode selects from
+the sessions on the remote host.
+
+Environment:
+  TMUX_REMOTE_CONTROL_HOST      Default SSH host or SSH config alias
+  TMUX_REMOTE_CONTROL_SESSION   Default tmux session selector
+  TMUX_REMOTE_CONTROL_TARGET    Default fixed tmux pane target
+  TMUX_REMOTE_CONTROL_EDITOR    Editor command; falls back to VISUAL, EDITOR, then vi
+
+Remote launcher:
+  HOST                SSH host or local SSH config alias; defaults to the short hostname
+
+Attach options:
+  --session TARGET    Follow the active pane in TARGET's tmux session
+  --target PANE       Always submit to one fixed pane
+  --list              List tmux sessions on the remote host
+  --once              Exit after one submission instead of prompting again
+  --editor            Open the external editor immediately instead of `> `
+
+At the inline prompt:
+  Enter               Submit the current line
+  Ctrl-G              Open the current draft in the external editor
+  Ctrl-D              Exit
+EOF
+}
+
+die() {
+  printf 'tmux-remote-control: %s\n' "$*" >&2
+  exit 1
+}
+
+shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
+shell_word() {
+  if [[ "$1" =~ ^[A-Za-z0-9_@%+=:,./-]+$ ]]; then
+    printf '%s' "$1"
+  else
+    shell_quote "$1"
+  fi
+}
+
+copy_controller_command() {
+  local launcher_host="${TMUX_REMOTE_CONTROL_HOST:-}"
+  local launcher_host_set="false"
+  while (($# > 0)); do
+    case "$1" in
+      --host)
+        (($# >= 2)) || die "--host requires a value"
+        [[ "$launcher_host_set" != "true" ]] || die "SSH host was specified more than once"
+        launcher_host="$2"
+        launcher_host_set="true"
+        shift 2
+        ;;
+      --)
+        shift
+        (($# == 0)) || die "unexpected launcher argument: $1"
+        break
+        ;;
+      -*)
+        die "unknown launcher option: $1"
+        ;;
+      *)
+        [[ "$launcher_host_set" != "true" ]] || die "unexpected launcher argument: $1"
+        launcher_host="$1"
+        launcher_host_set="true"
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -z "$launcher_host" ]]; then
+    launcher_host="$(hostname -s)"
+  fi
+  [[ -n "$launcher_host" && "$launcher_host" != -* && "$launcher_host" != *[[:space:]]* ]] || \
+    die "invalid SSH host: $launcher_host"
+
+  local pane="${TMUX_PANE:-}"
+  [[ "$pane" =~ ^%[0-9]+$ ]] || \
+    die "run the launcher inside tmux so TMUX_PANE identifies the current pane"
+
+  local session_name
+  session_name="$(tmux display-message -p -t "$pane" '#{session_name}')" || \
+    die "could not identify the current tmux session"
+  [[ -n "$session_name" && "$session_name" != *[[:cntrl:]]* ]] || \
+    die "could not identify a valid current tmux session"
+
+  local controller_command
+  controller_command="tmux-remote-control attach $(shell_word "$launcher_host") $(shell_word "$session_name")"
+  if printf '%s' "$controller_command" | tmux load-buffer -w -; then
+    printf 'Copied controller command to the local clipboard:\n%s\n' "$controller_command"
+  else
+    printf 'Could not copy through tmux. Copy this controller command manually:\n%s\n' \
+      "$controller_command" >&2
+  fi
+}
+
+case "${1:-}" in
+  attach)
+    shift
+    ;;
+  -h|--help)
+    usage
+    exit 0
+    ;;
+  *)
+    copy_controller_command "$@"
+    exit 0
+    ;;
+esac
+
+host="${TMUX_REMOTE_CONTROL_HOST:-}"
+target="${TMUX_REMOTE_CONTROL_TARGET:-}"
+session_target="${TMUX_REMOTE_CONTROL_SESSION:-}"
+explicit_target="false"
+explicit_session="false"
+action="compose"
+loop="true"
+editor_first="false"
+
+while (($# > 0)); do
+  case "$1" in
+    --host)
+      (($# >= 2)) || die "--host requires a value"
+      host="$2"
+      shift 2
+      ;;
+    --target)
+      (($# >= 2)) || die "--target requires a value"
+      [[ "$explicit_session" != "true" ]] || die "--session and --target cannot be used together"
+      target="$2"
+      session_target=""
+      explicit_target="true"
+      shift 2
+      ;;
+    --session)
+      (($# >= 2)) || die "--session requires a value"
+      [[ "$explicit_target" != "true" ]] || die "--session and --target cannot be used together"
+      session_target="$2"
+      target=""
+      explicit_session="true"
+      shift 2
+      ;;
+    --list)
+      action="list"
+      shift
+      ;;
+    --loop)
+      loop="true"
+      shift
+      ;;
+    --once)
+      loop="false"
+      shift
+      ;;
+    --editor)
+      editor_first="true"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      (($# == 0)) || die "unexpected argument: $1"
+      break
+      ;;
+    -*)
+      die "unknown option: $1"
+      ;;
+    *)
+      if [[ -z "$host" ]]; then
+        host="$1"
+      elif [[ "$explicit_target" != "true" && "$explicit_session" != "true" ]]; then
+        session_target="$1"
+        target=""
+        explicit_session="true"
+      else
+        die "unexpected argument: $1"
+      fi
+      shift
+      ;;
+  esac
+done
+
+[[ -n "$host" ]] || die "SSH host is required (argument, --host, or TMUX_REMOTE_CONTROL_HOST)"
+[[ "$host" != -* && "$host" != *[[:space:]]* ]] || die "invalid SSH host: $host"
+if [[ "$action" != "compose" ]]; then
+  [[ "$explicit_target" != "true" && "$explicit_session" != "true" ]] || \
+    die "target options cannot be combined with --$action"
+  target=""
+  session_target=""
+fi
+[[ -z "$session_target" || -z "$target" ]] || \
+  die "TMUX_REMOTE_CONTROL_SESSION and TMUX_REMOTE_CONTROL_TARGET cannot both be set"
+
+validate_tmux_target() {
+  [[ -n "$1" && "$1" != *[[:cntrl:]]* ]] || die "invalid tmux target: $1"
+}
+
+temp_root="${TMUX_REMOTE_CONTROL_TMPDIR:-${TMPDIR:-/tmp}}"
+if [[ ! -d "$temp_root" || ! -w "$temp_root" ]]; then
+  temp_root="/tmp"
+fi
+session_file="$(mktemp "$temp_root/tmux-remote-control-sessions.XXXXXX")"
+query_file="$(mktemp "$temp_root/tmux-remote-control-query.XXXXXX")"
+control_dir="$(mktemp -d "$temp_root/tmux-remote-control-ssh.XXXXXX")"
+control_path="$control_dir/control"
+ssh_args=(-o ControlMaster=auto -o ControlPersist=10m -o "ControlPath=$control_path")
+prompt_file=""
+choices=""
+cleanup() {
+  ssh -o "ControlPath=$control_path" -O exit "$host" >/dev/null 2>&1 || true
+  rm -f "$session_file" "$query_file"
+  [[ -z "$prompt_file" ]] || rm -f "$prompt_file"
+  [[ -z "$choices" ]] || rm -f "$choices"
+  rm -rf "$control_dir"
+}
+trap cleanup EXIT
+
+session_ids=()
+session_labels=()
+session_count=0
+if [[ "$action" == "list" || ( -z "$session_target" && -z "$target" ) ]]; then
+  session_format=$'#{session_id}\t#{session_name}\t#{session_windows}\t#{session_attached}'
+  quoted_session_format="$(shell_quote "$session_format")"
+  ssh "${ssh_args[@]}" -T "$host" \
+    "tmux list-sessions -F $quoted_session_format" \
+    >"$session_file" || die "could not list tmux sessions on $host"
+
+  while IFS=$'\t' read -r session_id session_name window_count attached_count; do
+    [[ "$session_id" =~ ^\$[0-9]+$ ]] || continue
+    session_ids+=("$session_id")
+    session_labels+=("$session_id"$'\t'"$session_name"$'\t'"${window_count} windows"$'\t'"${attached_count} clients")
+    session_count=$((session_count + 1))
+  done <"$session_file"
+
+  if [[ "$action" == "list" ]]; then
+    printf 'SESSION\tNAME\tWINDOWS\tCLIENTS\n'
+    if ((session_count > 0)); then
+      printf '%s\n' "${session_labels[@]}"
+    fi
+    exit 0
+  fi
+
+  ((session_count > 0)) || die "no tmux sessions found on $host"
+  if ((session_count == 1)); then
+    session_target="${session_ids[0]}"
+  else
+    choices="$(mktemp "$temp_root/tmux-remote-control-choices.XXXXXX")"
+    printf '%s\n' "${session_labels[@]}" >"$choices"
+    if command -v fzf >/dev/null 2>&1; then
+      selected="$(fzf --prompt='remote tmux session> ' --height=~40% --reverse <"$choices")" || exit 0
+      session_target="${selected%%$'\t'*}"
+    else
+      printf 'Select a remote tmux session:\n' >/dev/tty
+      n=1
+      while IFS= read -r choice; do
+        printf '  %d) %s\n' "$n" "$choice" >/dev/tty
+        n=$((n + 1))
+      done <"$choices"
+      printf '> ' >/dev/tty
+      IFS= read -r selected_number </dev/tty
+      [[ "$selected_number" =~ ^[0-9]+$ ]] || die "invalid selection"
+      ((selected_number >= 1 && selected_number <= session_count)) || die "selection out of range"
+      session_target="${session_ids[$((selected_number - 1))]}"
+    fi
+  fi
+fi
+
+session_id=""
+session_name=""
+pane_id=""
+pane_location=""
+if [[ -n "$session_target" ]]; then
+  validate_tmux_target "$session_target"
+  quoted_session_target="$(shell_quote "$session_target")"
+  ssh "${ssh_args[@]}" -T "$host" \
+    "tmux display-message -p -t $quoted_session_target '#{session_id}|#{session_name}'" \
+    >"$query_file" || die "could not find tmux session for $session_target on $host"
+  IFS='|' read -r session_id session_name <"$query_file" || true
+  [[ "$session_id" =~ ^\$[0-9]+$ && -n "$session_name" ]] || \
+    die "could not find tmux session for $session_target on $host"
+else
+  validate_tmux_target "$target"
+  quoted_target="$(shell_quote "$target")"
+  ssh "${ssh_args[@]}" -T "$host" \
+    "tmux display-message -p -t $quoted_target '#{pane_id}|#{session_name}:#{window_index}.#{pane_index}'" \
+    >"$query_file" || die "could not find tmux pane $target on $host"
+  IFS='|' read -r pane_id pane_location <"$query_file" || true
+  [[ "$pane_id" =~ ^%[0-9]+$ && -n "$pane_location" ]] || \
+    die "could not find tmux pane $target on $host"
+fi
+
+editor="${TMUX_REMOTE_CONTROL_EDITOR:-${VISUAL:-${EDITOR:-vi}}}"
+editor_marker="__TMUX_REMOTE_CONTROL_EDITOR_$$__"
+if [[ "$editor_first" != "true" ]]; then
+  set -o emacs
+  bind "\"\\C-g\":\"\\C-a${editor_marker}\\C-j\""
+fi
+
+while :; do
+  prompt_file="$(mktemp "$temp_root/tmux-remote-control.XXXXXX")"
+  trim_editor_newline="false"
+
+  if [[ "$editor_first" == "true" ]]; then
+    trim_editor_newline="true"
+    /bin/sh -c "$editor \"\$1\"" sh "$prompt_file" || die "editor exited unsuccessfully"
+  else
+    draft=""
+    if ! IFS= read -e -r -p "> " draft </dev/tty; then
+      exit 0
+    fi
+    printf '\033[1A\r\033[2K' >/dev/tty
+
+    if [[ "$draft" == "$editor_marker"* ]]; then
+      trim_editor_newline="true"
+      printf '%s' "${draft#"$editor_marker"}" >"$prompt_file"
+      /bin/sh -c "$editor \"\$1\"" sh "$prompt_file" || die "editor exited unsuccessfully"
+    else
+      printf '%s' "$draft" >"$prompt_file"
+    fi
+  fi
+
+  if [[ ! -s "$prompt_file" ]]; then
+    if [[ "$loop" == "true" && "$editor_first" != "true" ]]; then
+      rm -f "$prompt_file"
+      prompt_file=""
+      continue
+    fi
+    exit 0
+  fi
+
+  buffer_name="tmux-remote-control-$$-${RANDOM:-0}"
+  cleanup_command="buffer_loaded=false; cleanup_buffer() { if [ \"\$buffer_loaded\" = true ]; then tmux delete-buffer -b '$buffer_name' >/dev/null 2>&1 || true; fi; }; trap cleanup_buffer EXIT"
+  if [[ -n "$session_id" ]]; then
+    remote_command="$cleanup_command; focused_pane=\$(tmux display-message -p -t '$session_id' '#{pane_id}') && test -n \"\$focused_pane\" && tmux load-buffer -b '$buffer_name' - && buffer_loaded=true && tmux paste-buffer -p -r -b '$buffer_name' -t \"\$focused_pane\" && tmux send-keys -t \"\$focused_pane\" Enter"
+  else
+    remote_command="$cleanup_command; tmux load-buffer -b '$buffer_name' - && buffer_loaded=true && tmux paste-buffer -p -r -b '$buffer_name' -t '$pane_id' && tmux send-keys -t '$pane_id' Enter"
+  fi
+
+  if [[ "$trim_editor_newline" == "true" ]]; then
+    node - "$prompt_file" <<'NODE' | ssh "${ssh_args[@]}" -T "$host" "$remote_command"
+const fs = require("node:fs");
+let content = fs.readFileSync(process.argv[2]);
+if (content.length > 0 && content[content.length - 1] === 0x0a) {
+  content = content.subarray(0, content.length - 1);
+  if (content.length > 0 && content[content.length - 1] === 0x0d) {
+    content = content.subarray(0, content.length - 1);
+  }
+}
+process.stdout.write(content);
+NODE
+  else
+    ssh "${ssh_args[@]}" -T "$host" "$remote_command" <"$prompt_file"
+  fi
+
+  rm -f "$prompt_file"
+  prompt_file=""
+  if [[ "$loop" != "true" ]]; then
+    if [[ -n "$session_id" ]]; then
+      printf 'Submitted input to %s session %s (%s), focused pane\n' "$host" "$session_name" "$session_id"
+    else
+      printf 'Submitted input to %s pane %s (%s)\n' "$host" "$pane_location" "$pane_id"
+    fi
+    exit 0
+  fi
+done

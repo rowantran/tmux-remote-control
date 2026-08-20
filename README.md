@@ -1,126 +1,163 @@
-# pi-tmux-remote-control
+# tmux-remote-control
 
-## WARNING: this is slop software for personal use. proceed with caution
+Compose input on a local device with no network typing latency, then send each completed input to the focused pane of a tmux session on a remote machine.
 
-Type prompts with no network latency while the complete, unmodified Pi TUI runs in tmux on a remote machine.
+`tmux-remote-control` is independent of the program running in the pane. It can control shells, editors, REPLs, terminal applications, or coding agents.
 
-- `pi-prompt` runs locally, provides an inline readline prompt, and injects completed prompts through SSH.
-- `/remote-control` runs inside remote Pi, identifies its exact tmux pane, and copies the local control command through tmux using OSC 52.
-- tmux remains the only input multiplexer. Normal attached-terminal input and injected prompts both enter the same pane PTY.
+## Workflow
 
-## Install locally
+There are two command modes.
+
+### 1. Copy a controller command from the remote tmux session
+
+Run the basic command inside the remote tmux pane:
 
 ```bash
-cd ~/workplace/pi-tmux-remote-control
-npm install
+tmux-remote-control devbox
+```
+
+`devbox` is the SSH host or local SSH config alias that the local device uses to reach this machine. If the machine's short hostname is directly usable over SSH, you can omit it:
+
+```bash
+tmux-remote-control
+```
+
+The command gets the current session from `TMUX_PANE` and copies a command such as this to the local clipboard:
+
+```bash
+tmux-remote-control attach devbox work
+```
+
+It also prints the command as a fallback.
+
+### 2. Attach the local controller
+
+Paste the copied command into a terminal on the local device:
+
+```bash
+tmux-remote-control attach devbox work
+```
+
+The local controller remains open until you press `Ctrl-D`. Before each submission, it snapshots the active pane in the remote session's current window. You can switch panes and windows between submissions while keeping one local controller open.
+
+```text
+attached keyboard ──────────┐
+                            ├─> focused tmux pane PTY ─> application stdin
+remote-control submission ──┘
+```
+
+The paste and Enter key use the same pane snapshot, so a focus change during submission cannot split one input across two panes.
+
+## Requirements
+
+Local device:
+
+- Bash
+- OpenSSH
+- Node.js for trimming the final newline added by external editors
+- `fzf` is optional and provides the session selector when several sessions exist
+
+Remote machine:
+
+- Bash
+- tmux
+- `tmux-remote-control` for generating the controller command
+- SSH access from the local device
+
+Development and verification also require npm and Python 3.
+
+## Install
+
+Install or link the same executable on both machines:
+
+```bash
 npm run verify
 mkdir -p ~/bin
-ln -sfn "$PWD/bin/pi-prompt" ~/bin/pi-prompt
+ln -sfn "$PWD/bin/tmux-remote-control" ~/bin/tmux-remote-control
 ```
 
-`~/bin` must be in your local `PATH`. This avoids requiring write access to the system npm prefix.
+Ensure `~/bin` is in `PATH`.
 
-## Install on the remote machine
+## Clipboard setup
 
-Copy or clone this repository to the remote machine, then install its Pi extension:
+The remote launcher uses `tmux load-buffer -w` to set the tmux buffer and send it to the terminal clipboard through OSC 52.
 
-```bash
-cd ~/workplace/pi-tmux-remote-control
-npm install
-npm run verify
-pi install "$PWD"
-```
-
-The remote machine does not need the `pi-prompt` executable, although installing it does no harm.
-
-## Isara tmux environment forwarding
-
-The extension needs the pane identifier but does not need access to tmux's control socket. When launched inside tmux, current versions of `isara pi run` automatically forward only `TMUX` and `TMUX_PANE`. Outside tmux, those variables remain absent.
-
-This does not grant the sandbox access to the tmux Unix socket or other panes. If you previously added a tmux path to `network.allowUnixSockets` in `security_profile.json`, remove it.
-
-## tmux clipboard setup
-
-On the remote machine, put this in `~/.tmux.conf`:
+On the remote machine, add this to `~/.tmux.conf`:
 
 ```tmux
 set -g set-clipboard on
 ```
 
-Restart the remote tmux server after changing it, or apply it to the running server:
+Apply it to a running tmux server:
 
 ```bash
 tmux set-option -g set-clipboard on
 ```
 
-Your local terminal must support OSC 52 clipboard writes. Ghostty, Kitty, iTerm2, WezTerm, and many current terminals support it. If a local tmux sits between SSH and the terminal, configure its `set-clipboard` option too.
+The local terminal must support OSC 52 clipboard writes. Ghostty, Kitty, iTerm2, and WezTerm support them. If another local tmux instance sits between SSH and the terminal, configure `set-clipboard on` there too.
 
-## Use
+If clipboard copying is unavailable, the launcher still prints the complete controller command for manual copying.
 
-Start normal Pi in remote tmux:
+## Attach options
+
+Follow a session directly without first running the remote launcher:
 
 ```bash
-ssh -t devbox
-cd /srv/project
-tmux new-session -A -s pi 'isara pi run'
+tmux-remote-control attach devbox work
 ```
 
-Inside Pi, run this once with the SSH host or local SSH config alias:
+A tmux session id or any pane in the session can identify the session:
+
+```bash
+tmux-remote-control attach devbox '$3'
+tmux-remote-control attach devbox --session %12
+```
+
+A pane supplied through `--session` is only used to locate its containing session during startup. The controller keeps the stable tmux session id afterward, so the original pane can close.
+
+Select from the sessions on the remote host:
+
+```bash
+tmux-remote-control attach devbox
+```
+
+List remote sessions:
+
+```bash
+tmux-remote-control attach devbox --list
+```
+
+Keep all submissions pinned to one pane instead of following focus:
+
+```bash
+tmux-remote-control attach devbox --target %12
+```
+
+Exit after one submission:
+
+```bash
+tmux-remote-control attach devbox work --once
+```
+
+## Local input
+
+Attach mode uses an inline readline prompt:
 
 ```text
-/remote-control devbox
+> type here
 ```
 
-The extension:
+Controls:
 
-1. Reads the exact pane id from the forwarded `TMUX_PANE` value.
-2. Remembers `devbox` globally in `~/.pi/agent/pi-tmux-remote-control.json` (or the directory selected by `PI_CODING_AGENT_DIR`).
-3. Builds a command such as:
+- `Enter`: submit the current line
+- `Ctrl-G`: open the current draft in an external editor, then submit when the editor exits
+- `Ctrl-D`: close the controller
 
-   ```bash
-   pi-prompt --host 'devbox' --target '%12' --loop
-   ```
+Pressing Enter on an empty prompt shows another prompt. Use `--editor` to open the external editor immediately. Add `--once` with `--editor` if the editor should open only once.
 
-4. Copies the command with Pi's built-in OSC 52 clipboard helper.
-5. Displays the command in the Pi transcript as a fallback.
+The editor is selected from the first configured value:
 
-Paste the copied command into a local terminal. Type at the zero-latency local prompt and press Enter to submit:
-
-```text
-> hello
-```
-
-Press `Ctrl-G` to open the current draft in your configured local editor; save and exit the editor to submit it. Press `Ctrl-D` at an empty prompt to stop. With `--loop`, pressing Enter on an empty prompt simply shows another prompt.
-
-After the host has been remembered, every pane and future Pi session for that remote user can use:
-
-```text
-/remote-control
-```
-
-Change the global host at any time by supplying a different value:
-
-```text
-/remote-control new-devbox
-```
-
-## Local prompt and editor
-
-The default input is a local readline prompt. It supports normal line editing and uses these additional controls:
-
-- `Enter`: submit and immediately clear the local input row
-- `Ctrl-G`: open the current draft in the external editor, then submit it when the editor exits
-- `Ctrl-D`: exit
-
-Use `--editor` to skip the inline prompt and open the external editor immediately.
-
-`pi-prompt` establishes an SSH control connection while discovering the target pane and reuses that authenticated connection for every submission. This avoids repeated SSH key exchange and authentication. The control connection and its private socket are closed when `pi-prompt` exits.
-
-There is still at least one network round trip between pressing Enter and Pi receiving the text. The input row is cleared before that network operation starts, so local feedback remains immediate. Remaining delay is normally remote network RTT plus the small tmux paste operation.
-
-The external editor is selected from the first configured value:
-
-1. `PI_PROMPT_EDITOR`
+1. `TMUX_REMOTE_CONTROL_EDITOR`
 2. `VISUAL`
 3. `EDITOR`
 4. `vi`
@@ -128,71 +165,27 @@ The external editor is selected from the first configured value:
 Examples:
 
 ```bash
-PI_PROMPT_EDITOR=nvim pi-prompt devbox %12 --loop
-PI_PROMPT_EDITOR='code --wait' pi-prompt devbox %12 --loop
-pi-prompt devbox %12 --editor
+TMUX_REMOTE_CONTROL_EDITOR=nvim tmux-remote-control attach devbox work
+TMUX_REMOTE_CONTROL_EDITOR='code --wait' tmux-remote-control attach devbox work
+tmux-remote-control attach devbox work --editor --once
 ```
 
-## Pane discovery without `/remote-control`
+## Environment
 
-Mark the current remote pane manually:
+- `TMUX_REMOTE_CONTROL_HOST`: default SSH host for either mode
+- `TMUX_REMOTE_CONTROL_SESSION`: default attach-mode session selector
+- `TMUX_REMOTE_CONTROL_TARGET`: default attach-mode fixed pane target
+- `TMUX_REMOTE_CONTROL_EDITOR`: attach-mode editor command
+- `TMUX_REMOTE_CONTROL_TMPDIR`: local directory for temporary files and the SSH control socket
 
-```bash
-tmux set-option -p @pi_prompt 1
-```
+Command-line host, session, and target arguments override environment defaults.
 
-Then the target can be omitted:
+## Connection behavior
 
-```bash
-pi-prompt devbox --loop
-```
+Attach mode establishes an SSH control connection during discovery. Every submission reuses it, which avoids repeated SSH key exchange and authentication. The private control socket and temporary files are removed when the controller exits.
 
-List panes:
+There is still at least one network round trip between pressing Enter and the remote application receiving the input. The local input row clears before that network operation starts, so local feedback remains immediate.
 
-```bash
-pi-prompt devbox --list
-```
+`tmux paste-buffer -p -r` uses bracketed paste when the target application has enabled it. Multiline editor input therefore arrives as one paste, followed by a separate Enter key.
 
-Mark a pane remotely from the local shell:
-
-```bash
-pi-prompt devbox --mark pi:0.0
-```
-
-If more than one pane is marked, `pi-prompt` uses local `fzf` when available or shows a numbered selector.
-
-## How the two input paths work
-
-A Unix process has only one standard input file descriptor. Pi cannot independently read two unrelated `stdin` streams.
-
-The remote tmux pane provides the required multiplexing instead:
-
-```text
-attached keyboard ─┐
-                   ├─> tmux pane PTY ─> Pi stdin
-pi-prompt paste ───┘
-```
-
-`tmux paste-buffer -p -r` wraps the local prompt in bracketed-paste control codes. Pi receives it as one multiline paste. `tmux send-keys Enter` then submits it.
-
-The two sources can technically write simultaneously, so avoid typing in the attached remote editor during the short prompt injection.
-
-## Troubleshooting clipboard copying
-
-Check the remote setting:
-
-```bash
-tmux show-options -g set-clipboard
-```
-
-Check that Pi is in tmux:
-
-```bash
-printf '%s\n' "$TMUX_PANE"
-```
-
-If this is empty inside Pi, update Isara and restart `isara pi run` from inside tmux. The extension intentionally does not connect to the tmux control socket as a fallback.
-
-If OSC 52 is blocked, `/remote-control` still displays the full command. Copy it manually.
-
-Some terminals require explicit permission for applications to write to the clipboard. Enable OSC 52 clipboard access in the local terminal settings.
+The attached keyboard and remote controller can technically write at the same time. Avoid typing in the target application during the short submission operation.

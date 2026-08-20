@@ -1,37 +1,19 @@
 {
-  "name": "pi-tmux-remote-control",
+  "name": "tmux-remote-control",
   "version": "0.1.0",
-  "description": "Compose Pi prompts locally and inject them into a normal Pi TUI running in remote tmux",
-  "type": "module",
+  "description": "Compose input locally and send it to the focused pane of a remote tmux session",
   "license": "MIT",
   "bin": {
-    "pi-prompt": "./bin/pi-prompt"
+    "tmux-remote-control": "./bin/tmux-remote-control"
   },
   "keywords": [
-    "pi-package",
-    "pi",
     "tmux",
     "ssh",
     "remote-control"
   ],
-  "pi": {
-    "extensions": [
-      "./extensions/remote-control.ts"
-    ]
-  },
   "scripts": {
-    "check": "bash -n bin/pi-prompt && tsc --noEmit",
-    "test": "bash test/pi-prompt.test.sh && node --experimental-strip-types test/remote-control.test.mjs",
+    "check": "bash -n bin/tmux-remote-control",
+    "test": "bash test/tmux-remote-control.test.sh",
     "verify": "npm run check && npm test"
-  },
-  "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*"
-  },
-  "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.84.1",
-    "@earendil-works/pi-tui": "0.84.1",
-    "@types/node": "^22.0.0",
-    "typescript": "^5.7.0"
   }
 }
