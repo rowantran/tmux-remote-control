@@ -70,8 +70,12 @@ if TMUX_PANE= "$script" example-host >"$root/launcher-output" 2>"$root/launcher-
 fi
 grep -F 'run the launcher inside tmux' "$root/launcher-error" >/dev/null
 
-# Fixed-pane mode resolves the supplied target to a stable pane id.
-"$script" attach example-host --target %7 --editor --once >"$root/fixed-output"
+# Fixed-pane mode resolves the supplied target to a stable pane id. A long
+# macOS-style temporary path must not be used for the SSH control socket.
+long_temp_root="$root/var/folders/abcdefghijklmnopqrstuvwxyz0123456789/T/very-long-temp-directory"
+mkdir -p "$long_temp_root"
+TMUX_REMOTE_CONTROL_TMPDIR="$long_temp_root" \
+  "$script" attach example-host --target %7 --editor --once >"$root/fixed-output"
 grep -F "paste-buffer -p -r" "$root/command" >/dev/null
 grep -F "delete-buffer" "$root/command" >/dev/null
 grep -F -- "-t '%7'" "$root/command" >/dev/null
@@ -79,7 +83,9 @@ grep -F -- "-t '%7'" "$root/command" >/dev/null
 grep -F "Submitted input to example-host pane work:0.0 (%7)" "$root/fixed-output" >/dev/null
 grep -F "ControlMaster=auto" "$root/ssh-args" >/dev/null
 grep -F "ControlPersist=10m" "$root/ssh-args" >/dev/null
-grep -F "ControlPath=" "$root/ssh-args" >/dev/null
+control_path_argument="$(grep -F 'ControlPath=' "$root/ssh-args")"
+[[ "$control_path_argument" == ControlPath=/tmp/tmux-rc.*/c ]]
+((${#control_path_argument} < 80))
 
 # Session mode resolves the focused pane for every submission.
 "$script" attach example-host --session %7 --editor --once >"$root/session-output"

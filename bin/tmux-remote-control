@@ -226,8 +226,11 @@ if [[ ! -d "$temp_root" || ! -w "$temp_root" ]]; then
 fi
 session_file="$(mktemp "$temp_root/tmux-remote-control-sessions.XXXXXX")"
 query_file="$(mktemp "$temp_root/tmux-remote-control-query.XXXXXX")"
-control_dir="$(mktemp -d "$temp_root/tmux-remote-control-ssh.XXXXXX")"
-control_path="$control_dir/control"
+# OpenSSH creates a temporary listener name next to ControlPath. macOS limits
+# Unix socket paths to 104 bytes, while its default TMPDIR is already long.
+# Keep this private directory deliberately short and use temp_root for files.
+control_dir="$(mktemp -d /tmp/tmux-rc.XXXXXX)"
+control_path="$control_dir/c"
 ssh_args=(-o ControlMaster=auto -o ControlPersist=10m -o "ControlPath=$control_path")
 prompt_file=""
 choices=""

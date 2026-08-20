@@ -176,13 +176,13 @@ tmux-remote-control attach devbox work --editor --once
 - `TMUX_REMOTE_CONTROL_SESSION`: default attach-mode session selector
 - `TMUX_REMOTE_CONTROL_TARGET`: default attach-mode fixed pane target
 - `TMUX_REMOTE_CONTROL_EDITOR`: attach-mode editor command
-- `TMUX_REMOTE_CONTROL_TMPDIR`: local directory for temporary files and the SSH control socket
+- `TMUX_REMOTE_CONTROL_TMPDIR`: local directory for prompt and discovery temporary files
 
 Command-line host, session, and target arguments override environment defaults.
 
 ## Connection behavior
 
-Attach mode establishes an SSH control connection during discovery. Every submission reuses it, which avoids repeated SSH key exchange and authentication. The private control socket and temporary files are removed when the controller exits.
+Attach mode establishes an SSH control connection during discovery. Every submission reuses it, which avoids repeated SSH key exchange and authentication. The private control socket uses a short directory under `/tmp` to stay below Unix-socket path limits on macOS. The control socket and temporary files are removed when the controller exits.
 
 There is still at least one network round trip between pressing Enter and the remote application receiving the input. The local input row clears before that network operation starts, so local feedback remains immediate.
 
