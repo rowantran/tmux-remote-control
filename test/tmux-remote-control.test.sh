@@ -76,9 +76,10 @@ long_temp_root="$root/var/folders/abcdefghijklmnopqrstuvwxyz0123456789/T/very-lo
 mkdir -p "$long_temp_root"
 TMUX_REMOTE_CONTROL_TMPDIR="$long_temp_root" \
   "$script" attach example-host --target %7 --editor --once >"$root/fixed-output"
+grep -F "sh -c" "$root/command" >/dev/null
 grep -F "paste-buffer -p -r" "$root/command" >/dev/null
 grep -F "delete-buffer" "$root/command" >/dev/null
-grep -F -- "-t '%7'" "$root/command" >/dev/null
+grep -F "%7" "$root/command" >/dev/null
 [[ "$(cat "$root/input")" == $'first line\nsecond line' ]]
 grep -F "Submitted input to example-host pane work:0.0 (%7)" "$root/fixed-output" >/dev/null
 grep -F "ControlMaster=auto" "$root/ssh-args" >/dev/null
@@ -90,7 +91,7 @@ control_path_argument="$(grep -F 'ControlPath=' "$root/ssh-args")"
 # Session mode resolves the focused pane for every submission.
 "$script" attach example-host --session %7 --editor --once >"$root/session-output"
 grep -F 'focused_pane=$(tmux display-message' "$root/command" >/dev/null
-grep -F -- "-t '\$3' '#{pane_id}'" "$root/command" >/dev/null
+grep -F '$3' "$root/command" >/dev/null
 grep -F -- '-t "$focused_pane"' "$root/command" >/dev/null
 [[ "$(cat "$root/input")" == $'first line\nsecond line' ]]
 grep -F 'Submitted input to example-host session work ($3), focused pane' "$root/session-output" >/dev/null
@@ -195,7 +196,11 @@ for argument in "$@"; do
   fi
   previous="$argument"
 done
-/bin/sh -c "${!#}"
+if command -v fish >/dev/null 2>&1; then
+  fish -c "${!#}"
+else
+  /bin/sh -c "${!#}"
+fi
 SH
   cat >"$root/bin/editor" <<'SH'
 #!/usr/bin/env bash

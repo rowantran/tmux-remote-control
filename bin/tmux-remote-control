@@ -363,6 +363,10 @@ while :; do
   else
     remote_command="$cleanup_command; tmux load-buffer -b '$buffer_name' - && buffer_loaded=true && tmux paste-buffer -p -r -b '$buffer_name' -t '$pane_id' && tmux send-keys -t '$pane_id' Enter"
   fi
+  # SSH asks the account's login shell to parse its command. Run the compound
+  # submission explicitly with POSIX sh so Fish, Nushell, and other login
+  # shells never parse assignments, functions, traps, or command substitutions.
+  remote_command="sh -c $(shell_quote "$remote_command")"
 
   if [[ "$trim_editor_newline" == "true" ]]; then
     node - "$prompt_file" <<'NODE' | ssh "${ssh_args[@]}" -T "$host" "$remote_command"
