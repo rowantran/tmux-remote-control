@@ -115,7 +115,9 @@ TMUX_REMOTE_CONTROL_SESSION=work "$script" attach example-host --target %7 --edi
 TMUX_REMOTE_CONTROL_SESSION=work "$script" attach example-host --list >/dev/null
 
 run_in_pty() {
-  TMUX_REMOTE_CONTROL_TEST_KEYS="$1" python3 - "$script" <<'PY'
+  TMUX_REMOTE_CONTROL_TEST_KEYS="$1" \
+    TMUX_REMOTE_CONTROL_TEST_KEYS_AFTER_PROMPT="${2:-}" \
+    python3 - "$script" <<'PY'
 import os
 import pty
 import select
@@ -131,6 +133,8 @@ if pid == 0:
 output = bytearray()
 deadline = time.monotonic() + 10
 sent = False
+after_prompt_keys = os.environ["TMUX_REMOTE_CONTROL_TEST_KEYS_AFTER_PROMPT"]
+sent_after_prompt = not after_prompt_keys
 while time.monotonic() < deadline:
     ready, _, _ = select.select([fd], [], [], 0.1)
     if ready:
@@ -144,6 +148,9 @@ while time.monotonic() < deadline:
         if not sent and b"> " in output:
             os.write(fd, bytes.fromhex(os.environ["TMUX_REMOTE_CONTROL_TEST_KEYS"]))
             sent = True
+        elif sent and not sent_after_prompt and output.count(b"> ") >= 2:
+            os.write(fd, bytes.fromhex(after_prompt_keys))
+            sent_after_prompt = True
     finished, status = os.waitpid(pid, os.WNOHANG)
     if finished:
         if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
@@ -155,9 +162,9 @@ else:
     sys.stderr.buffer.write(output)
     raise SystemExit("timed out waiting for tmux-remote-control")
 
-if not sent:
+if not sent or not sent_after_prompt:
     sys.stderr.buffer.write(output)
-    raise SystemExit("inline prompt was not displayed")
+    raise SystemExit("expected inline prompt was not displayed")
 if b"\x1b[1A\r\x1b[2K" not in output:
     sys.stderr.buffer.write(output)
     raise SystemExit("submitted inline prompt was not cleared")
@@ -176,6 +183,19 @@ run_in_pty "647261667407"
 [[ "$(cat "$root/input")" == $'first line\nsecond line' ]]
 unset TMUX_REMOTE_CONTROL_TEST_EDITOR_INITIAL
 
+# Ctrl-C clears the current draft in both legacy and CSI-u terminal modes.
+run_in_pty "6469736361726403" "6b656570740d"
+[[ "$(cat "$root/input")" == "kept" ]]
+run_in_pty "646973636172641b5b39393b3575" "616c736f206b6570740d"
+[[ "$(cat "$root/input")" == "also kept" ]]
+
+# Ctrl-D exits without submitting a nonempty draft in both input modes.
+printf 'not submitted' >"$root/input"
+run_in_pty "647261667404"
+[[ "$(cat "$root/input")" == "not submitted" ]]
+run_in_pty "64726166741b5b3130303b3575"
+[[ "$(cat "$root/input")" == "not submitted" ]]
+
 # Extended keyboard reporting preserves standard Readline Ctrl and Alt editing.
 run_in_pty "776f726c641b5b39373b357568656c6c6f200d"
 [[ "$(cat "$root/input")" == "hello world" ]]
@@ -184,14 +204,15 @@ run_in_pty "68656c6c6f20776f726c641b5b39383b3375626967200d"
 
 # Navigation and zoom shortcuts run remote tmux commands without submitting the
 # draft. CSI-u keeps Ctrl-J and Ctrl-number distinct from Enter and other keys.
-navigation_keys="$(python3 - <<'PY'
-keys = "fhjklpn0123456789"
-print(b"".join(f"\x1b[{ord(key)};5u".encode() for key in keys).hex())
-PY
-)"
 : >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
-run_in_pty "6b6565702074686973206472616674${navigation_keys}0d"
-[[ "$(cat "$root/input")" == "keep this draft" ]]
+while IFS= read -r navigation_key; do
+  run_in_pty "6b6565702074686973206472616674${navigation_key}0d"
+  [[ "$(cat "$root/input")" == "keep this draft" ]]
+done < <(python3 - <<'PY'
+for key in "fhjklpn0123456789":
+    print(f"\x1b[{ord(key)};5u".encode().hex())
+PY
+)
 cat >"$root/expected-navigation-commands" <<'EOF'
 tmux resize-pane -Z -t '$3'
 tmux select-pane -t '$3' -D

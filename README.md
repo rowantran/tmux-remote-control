@@ -158,7 +158,8 @@ Controls:
 - `Ctrl-L`: select the pane above
 - `Ctrl-P` / `Ctrl-N`: select the previous or next window
 - `Ctrl-0` through `Ctrl-9`: select a window by index
-- `Ctrl-D`: close the controller
+- `Ctrl-C`: discard the current draft and show a clean prompt
+- `Ctrl-D`: close the controller, even when the current draft is not empty
 
 Pane and window shortcuts work when the controller follows a session. They keep the current draft at the prompt and use the same SSH control connection as submissions. Fixed-pane mode ignores them and rings the terminal bell because that mode stays pinned to one pane.
 

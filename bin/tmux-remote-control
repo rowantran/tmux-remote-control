@@ -42,6 +42,7 @@ At the inline prompt:
   Ctrl-H/J/K/L        Select the remote pane down/left/right/up
   Ctrl-P / Ctrl-N     Select the previous/next remote window
   Ctrl-0 ... Ctrl-9   Select a remote window by index
+  Ctrl-C              Clear the current draft
   Ctrl-D              Exit
 EOF
 }
@@ -239,6 +240,7 @@ ssh_args=(-o ControlMaster=auto -o ControlPersist=10m -o "ControlPath=$control_p
 prompt_file=""
 choices=""
 keyboard_protocol_active="false"
+prompt_terminal_state=""
 restore_keyboard_protocol() {
   if [[ "$keyboard_protocol_active" == "true" ]]; then
     # Restore the terminal's previous Kitty keyboard protocol mode. This keeps
@@ -247,7 +249,14 @@ restore_keyboard_protocol() {
     keyboard_protocol_active="false"
   fi
 }
+restore_prompt_terminal() {
+  if [[ -n "$prompt_terminal_state" ]]; then
+    stty "$prompt_terminal_state" </dev/tty 2>/dev/null || true
+    prompt_terminal_state=""
+  fi
+}
 cleanup() {
+  restore_prompt_terminal
   restore_keyboard_protocol
   ssh -o "ControlPath=$control_path" -O exit "$host" >/dev/null 2>&1 || true
   rm -f "$session_file" "$query_file"
@@ -392,11 +401,15 @@ if [[ "$editor_first" != "true" ]]; then
     bind_navigation_key "\\e[$((48 + window_index));5u" "window-$window_index"
   done
 
-  # Signal keys are encoded as CSI-u while keyboard disambiguation is active,
-  # so preserve their normal interrupt, end-of-file, quit, and suspend behavior.
-  bind "\"\\e[99;5u\":\"\\C-e\\C-u${key_marker}interrupt\\C-j\""
-  bind '"\e[100;5u": end-of-file'
-  bind "\"\\e[92;5u\":\"\\C-e\\C-u${key_marker}quit\\C-j\""
+  # Ctrl-C clears the draft, and Ctrl-D is the only prompt shortcut that exits.
+  # Bind both legacy and CSI-u forms. The prompt temporarily disables terminal
+  # driver signals for Ctrl-C and Ctrl-\\ so Readline receives the legacy forms.
+  bind "\"\\C-c\":\"\\C-e\\C-u${key_marker}clear-draft\\C-j\""
+  bind "\"\\e[99;5u\":\"\\C-e\\C-u${key_marker}clear-draft\\C-j\""
+  bind "\"\\C-d\":\"\\C-e\\C-u${key_marker}exit\\C-j\""
+  bind "\"\\e[100;5u\":\"\\C-e\\C-u${key_marker}exit\\C-j\""
+  bind '"\C-\\": abort'
+  bind '"\e[92;5u": abort'
   bind_navigation_key "\\e[122;5u" "suspend"
 fi
 
@@ -443,8 +456,11 @@ while :; do
     # Unsupported terminals ignore this sequence and use the legacy bindings.
     printf '\033[>1u' >/dev/tty
     keyboard_protocol_active="true"
+    prompt_terminal_state="$(stty -g </dev/tty)"
+    stty intr undef quit undef </dev/tty
     read_succeeded="true"
     IFS= read -e -r -p "> " draft </dev/tty || read_succeeded="false"
+    restore_prompt_terminal
     restore_keyboard_protocol
     [[ "$read_succeeded" == "true" ]] || exit 0
     printf '\033[1A\r\033[2K' >/dev/tty
@@ -456,8 +472,8 @@ while :; do
     elif [[ "$draft" == "$key_marker"* ]]; then
       key_action="${draft#"$key_marker"}"
       case "$key_action" in
-        interrupt) exit 130 ;;
-        quit) exit 131 ;;
+        clear-draft) ;;
+        exit) exit 0 ;;
         suspend)
           kill -TSTP "$$"
           ;;
