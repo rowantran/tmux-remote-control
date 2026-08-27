@@ -5,6 +5,7 @@ usage() {
   cat <<'EOF'
 Usage:
   tmux-remote-control [HOST]
+  tmux-remote-control --print-controller-command [HOST]
   tmux-remote-control attach HOST [SESSION]
   tmux-remote-control attach --host HOST [--session SESSION_OR_PANE | --target PANE]
   tmux-remote-control attach HOST --list
@@ -69,8 +70,13 @@ shell_word() {
 copy_controller_command() {
   local launcher_host="${TMUX_REMOTE_CONTROL_HOST:-}"
   local launcher_host_set="false"
+  local print_controller_command="false"
   while (($# > 0)); do
     case "$1" in
+      --print-controller-command)
+        print_controller_command="true"
+        shift
+        ;;
       --host)
         (($# >= 2)) || die "--host requires a value"
         [[ "$launcher_host_set" != "true" ]] || die "SSH host was specified more than once"
@@ -105,13 +111,23 @@ copy_controller_command() {
   [[ "$pane" =~ ^%[0-9]+$ ]] || \
     die "run the launcher inside tmux so TMUX_PANE identifies the current pane"
 
+  local controller_command
+  if [[ "$print_controller_command" == "true" ]]; then
+    # Pi may run inside a sandbox that forwards TMUX_PANE but deliberately
+    # blocks the tmux server socket. Attach mode accepts a pane as a session
+    # locator and resolves it to a stable session id over SSH, so this path
+    # can generate the command without connecting to the local tmux server.
+    controller_command="tmux-remote-control attach $(shell_word "$launcher_host") --session $(shell_word "$pane")"
+    printf '%s\n' "$controller_command"
+    return
+  fi
+
   local session_name
   session_name="$(tmux display-message -p -t "$pane" '#{session_name}')" || \
     die "could not identify the current tmux session"
   [[ -n "$session_name" && "$session_name" != *[[:cntrl:]]* ]] || \
     die "could not identify a valid current tmux session"
 
-  local controller_command
   controller_command="tmux-remote-control attach $(shell_word "$launcher_host") $(shell_word "$session_name")"
   if printf '%s' "$controller_command" | tmux load-buffer -w -; then
     printf 'Copied controller command to the local clipboard:\n%s\n' "$controller_command"

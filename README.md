@@ -90,17 +90,17 @@ Run the installer again after updating this repository. It replaces the installe
 
 Run `/reload` in an existing Pi process, or start a new one. Inside a remote tmux session, press `Ctrl+Shift+R`. The extension:
 
-1. Runs the remote launcher and copies the local `tmux-remote-control attach ...` command through tmux.
+1. Builds the local `tmux-remote-control attach ...` command from `TMUX_PANE` and copies it with OSC 52, without opening the tmux server socket.
 2. Replaces Pi's normal editor with a one-line remote-input indicator.
 3. Keeps the hidden editor active, so tmux paste and Enter submissions continue to use Pi's normal input path.
 
-Paste the copied command into a local terminal. Press `Ctrl+Shift+R` again, or run `/remote-control`, to restore Pi's normal editor. The local controller stays open and works after either mode change.
+Paste the copied command into a local terminal. Press `Ctrl+Shift+R` again, or run `/remote-control`, to restore Pi's normal editor. The local controller stays open and works after either mode change. Because the extension does not open the tmux socket, it also works when Pi runs in a sandbox that forwards `TMUX_PANE` but blocks local Unix sockets, such as `isara pi run`.
 
 Pi selectors and dialogs, such as `/tree` and extension questionnaires, temporarily take keyboard focus instead of the hidden editor. Do not submit a local controller message while one is open. Interact with it in the remote tmux pane. When it closes, focus returns to the hidden editor. You can then continue from the same local controller or press `Ctrl+Shift+R` to restore direct input.
 
 ## Clipboard setup
 
-The remote launcher uses `tmux load-buffer -w` to set the tmux buffer and send it to the terminal clipboard through OSC 52.
+The normal remote launcher uses `tmux load-buffer -w` to set the tmux buffer and send it to the terminal clipboard through OSC 52. The Pi extension emits OSC 52 directly from its pane, which tmux handles when `set-clipboard` is `on`.
 
 On the remote machine, add this to `~/.tmux.conf`:
 

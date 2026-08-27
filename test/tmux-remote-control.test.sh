@@ -92,6 +92,33 @@ if TMUX_PANE= "$script" example-host >"$root/launcher-output" 2>"$root/launcher-
 fi
 grep -F 'run the launcher inside tmux' "$root/launcher-error" >/dev/null
 
+# Pi's launcher path must generate a controller command from TMUX_PANE without
+# touching the local tmux socket. Attach mode resolves the pane to a stable
+# session id over SSH when the local controller starts.
+mkdir -p "$root/no-tmux-bin"
+cat >"$root/no-tmux-bin/tmux" <<SH
+#!/usr/bin/env bash
+printf 'tmux was invoked\n' >'$root/unexpected-tmux-invocation'
+exit 126
+SH
+chmod +x "$root/no-tmux-bin/tmux"
+TMUX_PANE=%42 PATH="$root/no-tmux-bin:$PATH" \
+  "$script" --print-controller-command devbox >"$root/printed-controller-command"
+[[ ! -e "$root/unexpected-tmux-invocation" ]]
+[[ "$(cat "$root/printed-controller-command")" == \
+  "tmux-remote-control attach devbox --session %42" ]]
+
+TMUX_PANE=%42 PATH="$root/no-tmux-bin:$PATH" \
+  "$script" --print-controller-command "dev'box" >"$root/quoted-controller-command"
+[[ "$(cat "$root/quoted-controller-command")" == \
+  "tmux-remote-control attach 'dev'\\''box' --session %42" ]]
+
+# The Pi extension must request the socket-free launcher mode and copy its one
+# line result with OSC 52 instead of invoking tmux inside the sandbox.
+grep -F '["--print-controller-command"]' "$project_root/pi-extension.ts" >/dev/null
+grep -F 'process.stdout.write(`\x1b]52;c;${encodedCommand}\x07`)' \
+  "$project_root/pi-extension.ts" >/dev/null
+
 # Fixed-pane mode resolves the supplied target to a stable pane id. A long
 # macOS-style temporary path must not be used for the SSH control socket.
 long_temp_root="$root/var/folders/abcdefghijklmnopqrstuvwxyz0123456789/T/very-long-temp-directory"
@@ -152,7 +179,24 @@ deadline = time.monotonic() + 10
 sent = False
 after_prompt_keys = os.environ["TMUX_REMOTE_CONTROL_TEST_KEYS_AFTER_PROMPT"]
 sent_after_prompt = not after_prompt_keys
-prompt_marker = b"\x1b[>1u> "
+keyboard_marker = b"\x1b[>1u"
+
+def prompt_count(data: bytearray) -> int:
+    # Readline may enable bracketed paste between our keyboard-mode request and
+    # the visible prompt. Count only markers that are followed by a prompt,
+    # without requiring those byte sequences to be adjacent.
+    count = 0
+    start = 0
+    while True:
+        marker = data.find(keyboard_marker, start)
+        if marker < 0:
+            return count
+        next_marker = data.find(keyboard_marker, marker + len(keyboard_marker))
+        end = len(data) if next_marker < 0 else next_marker
+        if b"> " in data[marker + len(keyboard_marker):end]:
+            count += 1
+        start = marker + len(keyboard_marker)
+
 while time.monotonic() < deadline:
     ready, _, _ = select.select([fd], [], [], 0.1)
     if ready:
@@ -163,10 +207,11 @@ while time.monotonic() < deadline:
         if not chunk:
             break
         output.extend(chunk)
-        if not sent and prompt_marker in output:
+        prompts = prompt_count(output)
+        if not sent and prompts >= 1:
             os.write(fd, bytes.fromhex(os.environ["TMUX_REMOTE_CONTROL_TEST_KEYS"]))
             sent = True
-        elif sent and not sent_after_prompt and output.count(prompt_marker) >= 2:
+        elif sent and not sent_after_prompt and prompts >= 2:
             os.write(fd, bytes.fromhex(after_prompt_keys))
             sent_after_prompt = True
     finished, status = os.waitpid(pid, os.WNOHANG)
@@ -206,7 +251,7 @@ run_in_pty "647261667407"
 unset TMUX_REMOTE_CONTROL_TEST_EDITOR_INITIAL
 
 # Ctrl-C clears the current draft in both legacy and CSI-u terminal modes.
-run_in_pty "6469736361726403" "6b656570740d"
+run_in_pty "6469736361726403" "6b6570740d"
 [[ "$(cat "$root/input")" == "kept" ]]
 run_in_pty "646973636172641b5b39393b3575" "616c736f206b6570740d"
 [[ "$(cat "$root/input")" == "also kept" ]]
@@ -274,7 +319,32 @@ grep -F 'no tmux sessions found' "$root/no-sessions-error" >/dev/null
 
 # Exercise focus following against tmux itself. Start on one window, switch to
 # another in the editor, and verify that input reaches only the new window.
-if command -v tmux >/dev/null 2>&1; then
+# Sandboxes can provide the tmux binary while denying every new Unix-socket
+# connection, so probe that capability without leaving a tmux server behind.
+can_connect_local_unix_socket() {
+  python3 - "$root/unix-socket-probe" <<'PY'
+import os
+import socket
+import sys
+
+path = sys.argv[1]
+server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+try:
+    server.bind(path)
+    server.listen(1)
+    client.connect(path)
+finally:
+    client.close()
+    server.close()
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+PY
+}
+
+if command -v tmux >/dev/null 2>&1 && can_connect_local_unix_socket 2>/dev/null; then
   cat >"$root/bin/ssh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail

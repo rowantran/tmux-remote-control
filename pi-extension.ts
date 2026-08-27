@@ -37,12 +37,25 @@ export default function tmuxRemoteControl(pi: ExtensionAPI): void {
 			return;
 		}
 
-		const result = await pi.exec("tmux-remote-control", [], { timeout: 5_000 });
+		const result = await pi.exec("tmux-remote-control", ["--print-controller-command"], { timeout: 5_000 });
 		if (result.code !== 0) {
 			const detail = result.stderr.trim() || result.stdout.trim() || `exit code ${result.code}`;
 			ctx.ui.notify(`Could not start remote input: ${detail}`, "error");
 			return;
 		}
+
+		const controllerCommand = result.stdout.trim();
+		if (!controllerCommand || /[\x00-\x1f\x7f]/.test(controllerCommand)) {
+			ctx.ui.notify("Could not start remote input: launcher returned an invalid controller command", "error");
+			return;
+		}
+
+		// Raw OSC 52 output is handled by tmux when set-clipboard is on. This
+		// copies through the pane without giving the sandbox access to tmux's
+		// Unix socket. Pi's own notification extension uses the same direct
+		// terminal-output pattern for non-rendering OSC sequences.
+		const encodedCommand = Buffer.from(controllerCommand, "utf8").toString("base64");
+		process.stdout.write(`\x1b]52;c;${encodedCommand}\x07`);
 
 		previousEditor = ctx.ui.getEditorComponent();
 		ctx.ui.setEditorComponent(
@@ -56,8 +69,7 @@ export default function tmuxRemoteControl(pi: ExtensionAPI): void {
 		);
 		active = true;
 
-		const message = result.stdout.trim();
-		ctx.ui.notify(message || "Copied the local controller command.", "info");
+		ctx.ui.notify(`Copied the local controller command:\n${controllerCommand}`, "info");
 	}
 
 	async function toggle(ctx: ExtensionContext): Promise<void> {
