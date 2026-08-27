@@ -2,11 +2,20 @@ import { CustomEditor, type ExtensionAPI, type ExtensionContext } from "@earendi
 import { truncateToWidth } from "@earendil-works/pi-tui";
 
 const SHORTCUT = "ctrl+shift+r";
-const STATUS_KEY = "tmux-remote-control";
+type CustomEditorArguments = ConstructorParameters<typeof CustomEditor>;
 
 class RemoteControlEditor extends CustomEditor {
+	constructor(
+		tui: CustomEditorArguments[0],
+		theme: CustomEditorArguments[1],
+		keybindings: CustomEditorArguments[2],
+		private readonly statusText: () => string,
+	) {
+		super(tui, theme, keybindings);
+	}
+
 	render(width: number): string[] {
-		return [truncateToWidth("Remote input active - Ctrl+Shift+R to show the Pi editor", width)];
+		return [truncateToWidth(this.statusText(), width)];
 	}
 }
 
@@ -17,7 +26,6 @@ export default function tmuxRemoteControl(pi: ExtensionAPI): void {
 
 	function disable(ctx: ExtensionContext): void {
 		ctx.ui.setEditorComponent(previousEditor);
-		ctx.ui.setStatus(STATUS_KEY, undefined);
 		previousEditor = undefined;
 		active = false;
 		ctx.ui.notify("Remote input disabled. The local controller can stay open.", "info");
@@ -37,8 +45,15 @@ export default function tmuxRemoteControl(pi: ExtensionAPI): void {
 		}
 
 		previousEditor = ctx.ui.getEditorComponent();
-		ctx.ui.setEditorComponent((tui, theme, keybindings) => new RemoteControlEditor(tui, theme, keybindings));
-		ctx.ui.setStatus(STATUS_KEY, "remote input");
+		ctx.ui.setEditorComponent(
+			(tui, theme, keybindings) =>
+				new RemoteControlEditor(
+					tui,
+					theme,
+					keybindings,
+					() => `📡  ${ctx.ui.theme.fg("dim", "remote control mode: enabled")}`,
+				),
+		);
 		active = true;
 
 		const message = result.stdout.trim();

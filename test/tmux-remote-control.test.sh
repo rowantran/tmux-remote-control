@@ -67,7 +67,24 @@ export TMUX_REMOTE_CONTROL_TEST_SSH_ARGS="$root/ssh-args"
 export TMUX_REMOTE_CONTROL_TEST_QUERY_COMMAND="$root/query-command"
 export TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS="$root/navigation-commands"
 
-script="$(cd "$(dirname "$0")/.." && pwd)/bin/tmux-remote-control"
+project_root="$(cd "$(dirname "$0")/.." && pwd)"
+script="$project_root/bin/tmux-remote-control"
+installer="$project_root/install-pi-extension.sh"
+
+# The Pi installer creates a regular copy and replaces an older symlink without
+# overwriting that symlink's target.
+install_home="$root/install-home"
+install_dir="$install_home/.pi/agent/extensions"
+old_target="$root/old-extension-target"
+mkdir -p "$install_dir"
+printf 'old target\n' >"$old_target"
+ln -s "$old_target" "$install_dir/tmux-remote-control.ts"
+HOME="$install_home" "$installer" >"$root/installer-output"
+[[ -f "$install_dir/tmux-remote-control.ts" ]]
+[[ ! -L "$install_dir/tmux-remote-control.ts" ]]
+cmp "$project_root/pi-extension.ts" "$install_dir/tmux-remote-control.ts"
+[[ "$(cat "$old_target")" == "old target" ]]
+grep -F "Installed Pi extension at $install_dir/tmux-remote-control.ts" "$root/installer-output" >/dev/null
 
 if TMUX_PANE= "$script" example-host >"$root/launcher-output" 2>"$root/launcher-error"; then
   echo "expected the remote launcher to require tmux" >&2

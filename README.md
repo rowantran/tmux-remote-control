@@ -80,12 +80,13 @@ Ensure `~/bin` is in `PATH`.
 
 ### Pi integration
 
-Install the included Pi extension globally, then reload Pi:
+Copy the included Pi extension into the global extension directory, then reload Pi:
 
 ```bash
-mkdir -p ~/.pi/agent/extensions
-ln -sfn "$PWD/pi-extension.ts" ~/.pi/agent/extensions/tmux-remote-control.ts
+./install-pi-extension.sh
 ```
+
+Run the installer again after updating this repository. It replaces the installed copy, including an older symlink installation.
 
 Run `/reload` in an existing Pi process, or start a new one. Inside a remote tmux session, press `Ctrl+Shift+R`. The extension:
 
