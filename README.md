@@ -78,6 +78,25 @@ ln -sfn "$PWD/bin/tmux-remote-control" ~/bin/tmux-remote-control
 
 Ensure `~/bin` is in `PATH`.
 
+### Pi integration
+
+Install the included Pi extension globally, then reload Pi:
+
+```bash
+mkdir -p ~/.pi/agent/extensions
+ln -sfn "$PWD/pi-extension.ts" ~/.pi/agent/extensions/tmux-remote-control.ts
+```
+
+Run `/reload` in an existing Pi process, or start a new one. Inside a remote tmux session, press `Ctrl+Shift+R`. The extension:
+
+1. Runs the remote launcher and copies the local `tmux-remote-control attach ...` command through tmux.
+2. Replaces Pi's normal editor with a one-line remote-input indicator.
+3. Keeps the hidden editor active, so tmux paste and Enter submissions continue to use Pi's normal input path.
+
+Paste the copied command into a local terminal. Press `Ctrl+Shift+R` again, or run `/remote-control`, to restore Pi's normal editor. The local controller stays open and works after either mode change.
+
+Pi selectors and dialogs, such as `/tree` and extension questionnaires, temporarily take keyboard focus instead of the hidden editor. Do not submit a local controller message while one is open. Interact with it in the remote tmux pane. When it closes, focus returns to the hidden editor. You can then continue from the same local controller or press `Ctrl+Shift+R` to restore direct input.
+
 ## Clipboard setup
 
 The remote launcher uses `tmux load-buffer -w` to set the tmux buffer and send it to the terminal clipboard through OSC 52.

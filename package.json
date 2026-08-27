@@ -6,11 +6,29 @@
   "bin": {
     "tmux-remote-control": "./bin/tmux-remote-control"
   },
+  "pi": {
+    "extensions": [
+      "./pi-extension.ts"
+    ]
+  },
   "keywords": [
     "tmux",
     "ssh",
-    "remote-control"
+    "remote-control",
+    "pi-package"
   ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    }
+  },
   "scripts": {
     "check": "bash -n bin/tmux-remote-control",
     "test": "bash test/tmux-remote-control.test.sh",
