@@ -200,7 +200,7 @@ def prompt_count(data: bytearray) -> int:
             return count
         next_marker = data.find(keyboard_marker_prefix, marker_end + 1)
         end = len(data) if next_marker < 0 else next_marker
-        if b"> " in data[marker_end + 1:end]:
+        if "› ".encode("utf-8") in data[marker_end + 1:end]:
             count += 1
         start = marker_end + 1
 
@@ -242,11 +242,26 @@ if not resized or not sent or not sent_after_prompt:
     sys.stderr.buffer.write(output)
     raise SystemExit("expected resized inline prompt was not displayed")
 last_clear = output.rfind(clear_screen)
-header = b"[controlling: example-host -> work]"
-prompt = b"> "
-if last_clear < 0 or header not in output[last_clear:] or output[last_clear:].find(header) > output[last_clear:].find(prompt):
+section = bytes(output[last_clear:])
+# Remove ANSI control sequences so colored text can be checked as one line.
+plain_section = __import__("re").sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", section)
+plain_section = plain_section.replace(b"\x1b_pi:c\x07", b"")
+header = "📡  Controlling: example-host → work".encode("utf-8")
+prompt = "› ".encode("utf-8")
+if last_clear < 0 or header not in plain_section or plain_section.find(header) > plain_section.find(prompt):
     sys.stderr.buffer.write(output)
-    raise SystemExit("controller header was not redrawn above the prompt after resize")
+    raise SystemExit("controller status was not redrawn above the prompt after resize")
+rendered_lines = plain_section.split(b"\r\n")
+status_row = next((index for index, line in enumerate(rendered_lines) if header in line), -1)
+if status_row < max(0, rows - 4):
+    sys.stderr.buffer.write(output)
+    raise SystemExit("controller prompt was not docked at the bottom after resize")
+if status_row + 3 >= len(rendered_lines) or not rendered_lines[status_row + 1].startswith("─".encode("utf-8")) or not rendered_lines[status_row + 2].startswith(prompt) or not rendered_lines[status_row + 3].startswith("─".encode("utf-8")):
+    sys.stderr.buffer.write(output)
+    raise SystemExit("controller prompt frame was not rendered in the expected order")
+if b"\x1b[38;2;142;192;124mexample-host\x1b[39m" not in section or b"\x1b[38;2;250;189;47mwork\x1b[39m" not in section:
+    sys.stderr.buffer.write(output)
+    raise SystemExit("controller host and target colors were not rendered")
 if b"\r\x1b[2K" not in output:
     sys.stderr.buffer.write(output)
     raise SystemExit("submitted inline prompt was not cleared")

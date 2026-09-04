@@ -161,11 +161,13 @@ tmux-remote-control attach devbox work --once
 
 ## Local input
 
-Attach mode clears the current terminal screen, shows the remote target at the top, and keeps the inline prompt directly below it. The prompt uses Pi's `@earendil-works/pi-tui` input component, including its standard terminal editing behavior:
+Attach mode clears the current terminal screen and docks the remote target and inline prompt at the bottom. The prompt uses Pi's `@earendil-works/pi-tui` input component, including its standard terminal editing behavior. Gruvbox colors distinguish the host and session; the borders and prompt arrow use the terminal's default foreground color:
 
 ```text
-[controlling: devbox -> work]
-> type here
+📡  Controlling: devbox → work
+─────────────────────────────
+› type here
+─────────────────────────────
 ```
 
 Controls:

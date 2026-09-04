@@ -34,7 +34,7 @@ Attach options:
   --target PANE       Always submit to one fixed pane
   --list              List tmux sessions on the remote host
   --once              Exit after one submission instead of prompting again
-  --editor            Open the external editor immediately instead of `> `
+  --editor            Open the external editor immediately instead of the inline prompt
 
 At the inline prompt:
   Enter               Submit the current line
@@ -364,14 +364,13 @@ fi
 
 editor="${TMUX_REMOTE_CONTROL_EDITOR:-${VISUAL:-${EDITOR:-vi}}}"
 
-controller_label=""
+controller_target=""
 if [[ "$editor_first" != "true" ]]; then
   if [[ -n "$session_id" ]]; then
     controller_target="$session_name"
   else
     controller_target="$pane_location"
   fi
-  controller_label="[controlling: $host -> $controller_target]"
 fi
 
 run_navigation_action() {
@@ -415,7 +414,7 @@ while :; do
     prompt_action_file="$(mktemp "$temp_root/tmux-remote-control-action.XXXXXX")"
     while :; do
       : >"$prompt_action_file"
-      node "$prompt_helper" "$prompt_file" "$prompt_action_file" "$controller_label" </dev/tty >/dev/tty || \
+      node "$prompt_helper" "$prompt_file" "$prompt_action_file" "$host" "$controller_target" </dev/tty >/dev/tty || \
         die "inline prompt exited unsuccessfully"
       printf '\r\033[2K' >/dev/tty
       IFS= read -r prompt_action <"$prompt_action_file" || \

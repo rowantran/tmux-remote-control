@@ -5,14 +5,16 @@ import {
   Input,
   Key,
   ProcessTerminal,
-  Text,
   TuiMainScreen,
   matchesKey,
+  truncateToWidth,
 } from "@earendil-works/pi-tui";
 
-const [draftPath, actionPath, controllerLabel] = process.argv.slice(2);
-if (!draftPath || !actionPath || !controllerLabel) {
-  process.stderr.write("Usage: tmux-remote-control-prompt DRAFT_FILE ACTION_FILE CONTROLLER_LABEL\n");
+const [draftPath, actionPath, controllerHost, controllerTarget] = process.argv.slice(2);
+if (!draftPath || !actionPath || !controllerHost || !controllerTarget) {
+  process.stderr.write(
+    "Usage: tmux-remote-control-prompt DRAFT_FILE ACTION_FILE CONTROLLER_HOST CONTROLLER_TARGET\n",
+  );
   process.exit(2);
 }
 if (!process.stdin.isTTY || !process.stdout.isTTY) {
@@ -24,6 +26,41 @@ const terminal = new ProcessTerminal();
 const tui = new TuiMainScreen(terminal);
 const input = new Input();
 let finished = false;
+
+const colorsEnabled = !("NO_COLOR" in process.env);
+const color = (red, green, blue, text) =>
+  colorsEnabled ? `\x1b[38;2;${red};${green};${blue}m${text}\x1b[39m` : text;
+const muted = (text) => color(146, 131, 116, text); // Gruvbox gray
+const hostColor = (text) => color(142, 192, 124, text); // Gruvbox aqua
+const targetColor = (text) => color(250, 189, 47, text); // Gruvbox yellow
+
+class ControllerPrompt {
+  constructor(inputComponent) {
+    this.input = inputComponent;
+  }
+
+  render(width) {
+    const safeWidth = Math.max(0, width);
+    const status =
+      `📡  ${muted("Controlling: ")}` +
+      hostColor(controllerHost) +
+      muted(" → ") +
+      targetColor(controllerTarget);
+    const border = "─".repeat(safeWidth);
+    const inputLine = this.input.render(width)[0] ?? "";
+    // Input uses a two-column `> ` prompt. Keep its width and replace only
+    // the glyph so editing, horizontal scrolling, and cursor placement stay
+    // under the control of pi-tui's Input component.
+    const decoratedInput = `› ${inputLine.slice(2)}`;
+    const content = [truncateToWidth(status, safeWidth), border, decoratedInput, border];
+    const topPadding = Math.max(0, terminal.rows - content.length);
+    return [...Array(topPadding).fill(""), ...content];
+  }
+
+  invalidate() {
+    this.input.invalidate();
+  }
+}
 
 function finish(action) {
   if (finished) return;
@@ -51,8 +88,7 @@ input.setValue(readFileSync(draftPath, "utf8"));
 input.handleInput("\x05");
 input.onSubmit = () => finish("submit");
 
-tui.addChild(new Text(controllerLabel, 0, 0));
-tui.addChild(input);
+tui.addChild(new ControllerPrompt(input));
 tui.setFocus(input);
 tui.addInputListener((data) => {
   // A legacy terminal sends the same newline byte for Enter and Ctrl-J. Let
