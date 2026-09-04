@@ -162,11 +162,14 @@ run_in_pty() {
   TMUX_REMOTE_CONTROL_TEST_KEYS="$1" \
     TMUX_REMOTE_CONTROL_TEST_KEYS_AFTER_PROMPT="${2:-}" \
     python3 - "$script" <<'PY'
+import fcntl
 import os
 import pty
 import select
 import signal
+import struct
 import sys
+import termios
 import time
 
 script = sys.argv[1]
@@ -177,9 +180,11 @@ if pid == 0:
 output = bytearray()
 deadline = time.monotonic() + 10
 sent = False
+resized = False
 after_prompt_keys = os.environ["TMUX_REMOTE_CONTROL_TEST_KEYS_AFTER_PROMPT"]
 sent_after_prompt = not after_prompt_keys
 keyboard_marker_prefix = b"\x1b[>"
+clear_screen = b"\x1b[2J\x1b[H"
 
 def prompt_count(data: bytearray) -> int:
     # ProcessTerminal negotiates the best available keyboard protocol. Count
@@ -210,7 +215,13 @@ while time.monotonic() < deadline:
             break
         output.extend(chunk)
         prompts = prompt_count(output)
-        if not sent and prompts >= 1:
+        if not resized and prompts >= 1:
+            size = os.get_terminal_size(fd)
+            columns = 100 if size.columns != 100 else 101
+            rows = size.lines or 24
+            fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+            resized = True
+        elif resized and not sent and output.count(clear_screen) >= 2:
             os.write(fd, bytes.fromhex(os.environ["TMUX_REMOTE_CONTROL_TEST_KEYS"]))
             sent = True
         elif sent and not sent_after_prompt and prompts >= 2:
@@ -227,13 +238,15 @@ else:
     sys.stderr.buffer.write(output)
     raise SystemExit("timed out waiting for tmux-remote-control")
 
-if not sent or not sent_after_prompt:
+if not resized or not sent or not sent_after_prompt:
     sys.stderr.buffer.write(output)
-    raise SystemExit("expected inline prompt was not displayed")
-header = b"\x1b[2J\x1b[H[controlling: example-host -> work]\r\n"
-if header not in output:
+    raise SystemExit("expected resized inline prompt was not displayed")
+last_clear = output.rfind(clear_screen)
+header = b"[controlling: example-host -> work]"
+prompt = b"> "
+if last_clear < 0 or header not in output[last_clear:] or output[last_clear:].find(header) > output[last_clear:].find(prompt):
     sys.stderr.buffer.write(output)
-    raise SystemExit("controller header was not displayed at the top of a clear screen")
+    raise SystemExit("controller header was not redrawn above the prompt after resize")
 if b"\r\x1b[2K" not in output:
     sys.stderr.buffer.write(output)
     raise SystemExit("submitted inline prompt was not cleared")

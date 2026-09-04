@@ -5,13 +5,14 @@ import {
   Input,
   Key,
   ProcessTerminal,
+  Text,
   TuiMainScreen,
   matchesKey,
 } from "@earendil-works/pi-tui";
 
-const [draftPath, actionPath] = process.argv.slice(2);
-if (!draftPath || !actionPath) {
-  process.stderr.write("Usage: tmux-remote-control-prompt DRAFT_FILE ACTION_FILE\n");
+const [draftPath, actionPath, controllerLabel] = process.argv.slice(2);
+if (!draftPath || !actionPath || !controllerLabel) {
+  process.stderr.write("Usage: tmux-remote-control-prompt DRAFT_FILE ACTION_FILE CONTROLLER_LABEL\n");
   process.exit(2);
 }
 if (!process.stdin.isTTY || !process.stdout.isTTY) {
@@ -50,6 +51,7 @@ input.setValue(readFileSync(draftPath, "utf8"));
 input.handleInput("\x05");
 input.onSubmit = () => finish("submit");
 
+tui.addChild(new Text(controllerLabel, 0, 0));
 tui.addChild(input);
 tui.setFocus(input);
 tui.addInputListener((data) => {
@@ -85,4 +87,5 @@ for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   });
 }
 
+terminal.clearScreen();
 tui.start();

@@ -364,13 +364,14 @@ fi
 
 editor="${TMUX_REMOTE_CONTROL_EDITOR:-${VISUAL:-${EDITOR:-vi}}}"
 
+controller_label=""
 if [[ "$editor_first" != "true" ]]; then
   if [[ -n "$session_id" ]]; then
     controller_target="$session_name"
   else
     controller_target="$pane_location"
   fi
-  printf '\033[2J\033[H[controlling: %s -> %s]\n' "$host" "$controller_target" >/dev/tty
+  controller_label="[controlling: $host -> $controller_target]"
 fi
 
 run_navigation_action() {
@@ -414,7 +415,7 @@ while :; do
     prompt_action_file="$(mktemp "$temp_root/tmux-remote-control-action.XXXXXX")"
     while :; do
       : >"$prompt_action_file"
-      node "$prompt_helper" "$prompt_file" "$prompt_action_file" </dev/tty >/dev/tty || \
+      node "$prompt_helper" "$prompt_file" "$prompt_action_file" "$controller_label" </dev/tty >/dev/tty || \
         die "inline prompt exited unsuccessfully"
       printf '\r\033[2K' >/dev/tty
       IFS= read -r prompt_action <"$prompt_action_file" || \
