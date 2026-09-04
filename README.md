@@ -2,7 +2,7 @@
 
 Compose input on a local device with no network typing latency, then send each completed input to the focused pane of a tmux session on a remote machine.
 
-By default, `tmux-remote-control` pastes into the terminal and can control shells, editors, REPLs, terminal applications, or coding agents. Its optional **Pi mode** sends messages directly to a running Pi extension instead, with no terminal typing or hidden input box.
+`tmux-remote-control` is independent of the program running in the pane. It can control shells, editors, REPLs, terminal applications, or coding agents.
 
 ## Workflow
 
@@ -63,16 +63,14 @@ Remote machine:
 - tmux
 - `tmux-remote-control` for generating the controller command
 - SSH access from the local device
-- For Pi mode: Node.js 18+ and this complete package, including `bin/tmux-remote-control-pi.cjs` and `lib/pi-remote.cjs`
 
-Development and verification also require npm, Python 3, and the development dependencies (`npm install --ignore-scripts --legacy-peer-deps`).
+Development and verification also require npm and Python 3.
 
 ## Install
 
-Keep the complete repository on both machines, then link the executable. The Pi helper resolves executable symlinks to find its support module:
+Install or link the same executable on both machines:
 
 ```bash
-npm ci --ignore-scripts --legacy-peer-deps
 npm run verify
 mkdir -p ~/bin
 ln -sfn "$PWD/bin/tmux-remote-control" ~/bin/tmux-remote-control
@@ -88,53 +86,17 @@ Copy the included Pi extension into the global extension directory, then reload 
 ./install-pi-extension.sh
 ```
 
-Run the installer again after updating this repository. It installs `~/.pi/agent/extensions/tmux-remote-control/index.ts` and its `lib/pi-remote.cjs` support module, then removes the old flat extension entry, including an older symlink installation.
+Run the installer again after updating this repository. It replaces the installed copy, including an older symlink installation.
 
-Run `/reload` in an existing Pi process, or start a new one. Inside a remote tmux session, press `Ctrl+Shift+R` or run `/remote-control`. The extension:
+Run `/reload` in an existing Pi process, or start a new one. Inside a remote tmux session, press `Ctrl+Shift+R`. The extension:
 
-1. Registers a private message endpoint for its tmux server and pane.
-2. Copies a controller command with `--pi`, the tmux socket path, and server PID. This step reads `TMUX` and `TMUX_PANE`; it does not open the tmux socket.
-3. Replaces Pi's editor with a **typing-locked** indicator. Typed text, paste, Enter, history recall, and clipboard/external-editor shortcuts cannot submit or change its draft.
+1. Builds the local `tmux-remote-control attach ...` command from `TMUX_PANE` and copies it with OSC 52, without opening the tmux server socket.
+2. Replaces Pi's normal editor with a one-line remote-input indicator.
+3. Keeps the hidden editor active, so tmux paste and Enter submissions continue to use Pi's normal input path.
 
-Paste the copied command into a local terminal. Each submission follows this path:
+Paste the copied command into a local terminal. Press `Ctrl+Shift+R` again, or run `/remote-control`, to restore Pi's normal editor. The local controller stays open and works after either mode change. Because the extension does not open the tmux socket, it also works when Pi runs in a sandbox that forwards `TMUX_PANE` but blocks local Unix sockets, such as `isara pi run`.
 
-```text
-local controller → SSH helper → focused pane's endpoint → pi.sendUserMessage()
-                                     (not terminal stdin)
-```
-
-Messages start a turn when Pi is idle, or become steering messages while it is working. Registered extension commands, skills, and prompt templates are supported. Built-in TUI commands such as `/tree` and `/settings`, and `!` shell shortcuts, are rejected with instructions to use Pi's visible editor instead. An acknowledgement means the extension handed the message to Pi; it does not mean the model finished or a later Pi input hook accepted it.
-
-Press `Ctrl+Shift+R` again to restore Pi's editor and its preserved draft. Escape still interrupts, and model/thinking controls, tool expansion, and message copying remain available. Selectors and questionnaires retain their own keyboard input; remote submissions are rejected while the editor does not have focus or an extension dialog is open.
-
-Enable remote mode separately in each Pi pane you want to control. The controller can keep following pane/window navigation, but **Pi mode never falls back to terminal paste**, including when you focus a shell or disable the extension. Ordinary attach commands without `--pi` retain terminal-input behavior.
-
-Disabling remote mode, `/reload`, session replacement, and Pi shutdown close the endpoint and remove its registration. Re-enable remote mode after reload or session replacement. The local controller can stay open. A failed submission exits the controller and saves its draft at the printed local path. A connection loss may occur after delivery, so check Pi before manually resending; the controller does not retry automatically.
-
-#### Endpoint identity and permissions
-
-The registry maps `(tmux socket path, server PID, pane ID)` to a random extension instance. Pane IDs are stable within a running tmux server, but do not identify a Pi process or conversation. The helper verifies the tmux server PID, snapshots the pane once, then handshakes with that exact endpoint. The prompt carries both the extension instance ID and the Pi session ID from the handshake; a mismatch is rejected.
-
-By default the registry and socket live under `/tmp/tmux-pi-<uid>`. Directories are owner-only and files/sockets are owner-only. This is a same-OS-user interface protected by SSH and local file permissions, not a public network listener. It does not isolate other processes running as your user.
-
-A crashed process can leave a stale registration. New endpoints do not overwrite existing registrations automatically. Confirm the old endpoint is stopped before removing the registration path reported by the error, then enable remote mode again. This prevents a second Pi process in the same pane from taking over a live endpoint.
-
-#### Sandboxes that block sockets
-
-Socket transport requires the SSH host to reach Pi's Unix socket. If a sandbox blocks sockets or uses a separate filesystem, explicitly configure the **files** transport and a private directory shared at the same absolute path with the host. There is no automatic transport downgrade.
-
-Before entering the sandbox, on the tmux host:
-
-```bash
-export TMUX_REMOTE_CONTROL_RPC_TRANSPORT=files
-export TMUX_REMOTE_CONTROL_RPC_DIR="$HOME/.local/run/tmux-pi"
-mkdir -p "$TMUX_REMOTE_CONTROL_RPC_DIR"
-chmod 700 "$TMUX_REMOTE_CONTROL_RPC_DIR"
-export TMUX_REMOTE_CONTROL_TMUX_SOCKET="$(tmux display-message -p '#{socket_path}')"
-export TMUX_REMOTE_CONTROL_TMUX_SERVER_PID="$(tmux display-message -p '#{pid}')"
-```
-
-Configure the sandbox to share that directory read/write and forward those four variables plus `TMUX_PANE`. The host and sandbox must use compatible file ownership. The copied command includes the shared directory path; the SSH helper discovers the transport from the registration. Requests and replies use private, atomically published files, checked about every 100 ms. `TMUX_PANE` alone is no longer enough to identify the endpoint's tmux server.
+Pi selectors and dialogs, such as `/tree` and extension questionnaires, temporarily take keyboard focus instead of the hidden editor. Do not submit a local controller message while one is open. Interact with it in the remote tmux pane. When it closes, focus returns to the hidden editor. You can then continue from the same local controller or press `Ctrl+Shift+R` to restore direct input.
 
 ## Clipboard setup
 
@@ -184,15 +146,6 @@ List remote sessions:
 ```bash
 tmux-remote-control attach devbox --list
 ```
-
-The command copied by the Pi extension includes these additional options:
-
-- `--pi`: use direct Pi messages, never terminal paste
-- `--tmux-socket PATH`: address the specific remote tmux server for discovery, navigation, and submission
-- `--tmux-server-pid PID`: reject Pi submissions if that server has been replaced
-- `--rpc-dir PATH`: use an explicitly configured remote endpoint directory
-
-Prefer the copied command rather than entering these values manually.
 
 Keep all submissions pinned to one pane instead of following focus:
 
@@ -266,24 +219,15 @@ tmux-remote-control attach devbox work --editor --once
 - `TMUX_REMOTE_CONTROL_TARGET`: default attach-mode fixed pane target
 - `TMUX_REMOTE_CONTROL_EDITOR`: attach-mode editor command
 - `TMUX_REMOTE_CONTROL_TMPDIR`: local directory for prompt and discovery temporary files
-- `TMUX_REMOTE_CONTROL_RPC_TRANSPORT`: Pi endpoint transport, `socket` (default) or `files`
-- `TMUX_REMOTE_CONTROL_RPC_DIR`: private remote endpoint directory; required for files transport
-- `TMUX_REMOTE_CONTROL_TMUX_SOCKET` and `TMUX_REMOTE_CONTROL_TMUX_SERVER_PID`: explicit host tmux identity when the sandbox does not forward `TMUX`; set both
 
 Command-line host, session, and target arguments override environment defaults.
 
 ## Connection behavior
 
-Attach mode establishes an SSH control connection during discovery. Every submission reuses it, which avoids repeated SSH key exchange and authentication. The private control socket uses a short directory under `/tmp` to stay below Unix-socket path limits on macOS. The control socket and temporary files are removed when the controller exits, except for Pi drafts preserved after a failed submission.
+Attach mode establishes an SSH control connection during discovery. Every submission reuses it, which avoids repeated SSH key exchange and authentication. The private control socket uses a short directory under `/tmp` to stay below Unix-socket path limits on macOS. The control socket and temporary files are removed when the controller exits.
 
 There is still at least one network round trip between pressing Enter and the remote application receiving the input. The local input row clears before that network operation starts, so local feedback remains immediate.
 
-In ordinary terminal mode, `tmux paste-buffer -p -r` uses bracketed paste when the target application has enabled it. Multiline editor input therefore arrives as one paste, followed by a separate Enter key. The attached keyboard and controller can write at the same time; avoid typing in the target application during that short operation.
+`tmux paste-buffer -p -r` uses bracketed paste when the target application has enabled it. Multiline editor input therefore arrives as one paste, followed by a separate Enter key.
 
-Pi mode does not use paste buffers or Enter keys. It sends a bounded JSON request through the registered endpoint, with a five-second handshake/submission timeout and no automatic retry. Local terminal typing cannot become part of that message.
-
-## Verification
-
-`npm run verify` checks syntax and runs transport, editor-lock, controller, installer, quoting, and tmux-routing tests. Socket and files transports are tested for stale identities, permissions, duplicate requests, timeouts, malformed input, and cleanup.
-
-With Pi and tmux installed, run `npm run test:pi` for the end-to-end checks. Set `PI_TEST_CLI` to an alternative Pi executable if needed. These tests install the extension in a temporary agent directory, start a private tmux server, and verify both transports against Pi's real TUI. A test extension intercepts every prompt before the model; no API key or model call is needed. They do not use your active Pi session.
+The attached keyboard and remote controller can technically write at the same time. Avoid typing in the target application during the short submission operation.

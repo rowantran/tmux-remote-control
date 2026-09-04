@@ -24,7 +24,6 @@ if [[ -n "${TMUX_REMOTE_CONTROL_TEST_SSH_ARGS:-}" ]]; then
   printf '%s\n' "$@" >"$TMUX_REMOTE_CONTROL_TEST_SSH_ARGS"
 fi
 command="${!#}"
-printf '%s\n' "$command" >>"$TMUX_REMOTE_CONTROL_TEST_ALL_COMMANDS"
 if [[ "$command" == *"list-sessions"* ]]; then
   if [[ "${TMUX_REMOTE_CONTROL_TEST_NO_SESSIONS:-}" != "1" ]]; then
     printf '$3\twork\t2\t1\n'
@@ -42,16 +41,12 @@ if [[ "$command" == *'#{pane_id}|#{session_name}'* ]]; then
   printf '%%7|work:0.0\n'
   exit 0
 fi
-if [[ "$command" == tmux*" resize-pane "* || "$command" == tmux*" select-pane "* || "$command" == tmux*" select-window "* ]]; then
+if [[ "$command" == "tmux resize-pane "* || "$command" == "tmux select-pane "* || "$command" == "tmux select-window "* ]]; then
   printf '%s\n' "$command" >>"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
   exit 0
 fi
 printf '%s\n' "$command" >"$TMUX_REMOTE_CONTROL_TEST_COMMAND"
 cat >"$TMUX_REMOTE_CONTROL_TEST_INPUT"
-if [[ "$command" == *"pi-send"* && "${TMUX_REMOTE_CONTROL_TEST_FAIL_PI_SEND:-}" == "1" ]]; then
-  printf 'mock RPC acknowledgement timed out\n' >&2
-  exit 1
-fi
 SH
 chmod +x "$root/bin/ssh"
 
@@ -71,10 +66,6 @@ export TMUX_REMOTE_CONTROL_TEST_INPUT="$root/input"
 export TMUX_REMOTE_CONTROL_TEST_SSH_ARGS="$root/ssh-args"
 export TMUX_REMOTE_CONTROL_TEST_QUERY_COMMAND="$root/query-command"
 export TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS="$root/navigation-commands"
-export TMUX_REMOTE_CONTROL_TEST_ALL_COMMANDS="$root/all-commands"
-# Do not let the developer's current tmux/Pi settings change test defaults.
-unset TMUX_REMOTE_CONTROL_HOST TMUX_REMOTE_CONTROL_SESSION TMUX_REMOTE_CONTROL_TARGET
-unset TMUX_REMOTE_CONTROL_TMUX_SOCKET TMUX_REMOTE_CONTROL_TMUX_SERVER_PID TMUX_REMOTE_CONTROL_RPC_DIR
 
 project_root="$(cd "$(dirname "$0")/.." && pwd)"
 script="$project_root/bin/tmux-remote-control"
@@ -89,12 +80,11 @@ mkdir -p "$install_dir"
 printf 'old target\n' >"$old_target"
 ln -s "$old_target" "$install_dir/tmux-remote-control.ts"
 HOME="$install_home" "$installer" >"$root/installer-output"
-[[ ! -e "$install_dir/tmux-remote-control.ts" && ! -L "$install_dir/tmux-remote-control.ts" ]]
-[[ -f "$install_dir/tmux-remote-control/index.ts" && ! -L "$install_dir/tmux-remote-control/index.ts" ]]
-cmp "$project_root/pi-extension.ts" "$install_dir/tmux-remote-control/index.ts"
-cmp "$project_root/lib/pi-remote.cjs" "$install_dir/tmux-remote-control/lib/pi-remote.cjs"
+[[ -f "$install_dir/tmux-remote-control.ts" ]]
+[[ ! -L "$install_dir/tmux-remote-control.ts" ]]
+cmp "$project_root/pi-extension.ts" "$install_dir/tmux-remote-control.ts"
 [[ "$(cat "$old_target")" == "old target" ]]
-grep -F "Installed Pi extension at $install_dir/tmux-remote-control/index.ts" "$root/installer-output" >/dev/null
+grep -F "Installed Pi extension at $install_dir/tmux-remote-control.ts" "$root/installer-output" >/dev/null
 
 if TMUX_PANE= "$script" example-host >"$root/launcher-output" 2>"$root/launcher-error"; then
   echo "expected the remote launcher to require tmux" >&2
@@ -102,8 +92,9 @@ if TMUX_PANE= "$script" example-host >"$root/launcher-output" 2>"$root/launcher-
 fi
 grep -F 'run the launcher inside tmux' "$root/launcher-error" >/dev/null
 
-# The legacy print path remains socket-free and unchanged. Attach resolves the
-# pane to a stable session id over SSH when the local controller starts.
+# Pi's launcher path must generate a controller command from TMUX_PANE without
+# touching the local tmux socket. Attach mode resolves the pane to a stable
+# session id over SSH when the local controller starts.
 mkdir -p "$root/no-tmux-bin"
 cat >"$root/no-tmux-bin/tmux" <<SH
 #!/usr/bin/env bash
@@ -124,121 +115,9 @@ TMUX_PANE=%42 PATH="$root/no-tmux-bin:$PATH" \
 
 # The Pi extension must request the socket-free launcher mode and copy its one
 # line result with OSC 52 instead of invoking tmux inside the sandbox.
-grep -F '["--print-controller-command", "--pi"]' "$project_root/pi-extension.ts" >/dev/null
+grep -F '["--print-controller-command"]' "$project_root/pi-extension.ts" >/dev/null
 grep -F 'process.stdout.write(`\x1b]52;c;${encodedCommand}\x07`)' \
   "$project_root/pi-extension.ts" >/dev/null
-
-expect_failure() {
-  local message="$1"
-  shift
-  if "$@" >"$root/failure-output" 2>"$root/failure-error"; then
-    printf 'expected failure: %s\n' "$*" >&2
-    exit 1
-  fi
-  grep -F -- "$message" "$root/failure-error" >/dev/null
-}
-
-# Pi is opt-in. Its printed command pins the server without opening its socket,
-# parses TMUX from the right, and preserves every quoted argument.
-TMUX='/tmp/pi-socket,123,0' TMUX_PANE=%42 PATH="$root/no-tmux-bin:$PATH" \
-  "$script" --print-controller-command --pi devbox >"$root/pi-controller-command"
-[[ "$(cat "$root/pi-controller-command")" == \
-  'tmux-remote-control attach devbox --pi --tmux-socket /tmp/pi-socket --tmux-server-pid 123 --session %42' ]]
-pi_socket="$root/socket,with comma ' and \$dollar"
-pi_rpc_dir="$root/rpc ' directory, \$literal"
-TMUX="$pi_socket,123,7" TMUX_PANE=%42 TMUX_REMOTE_CONTROL_RPC_DIR="$pi_rpc_dir" \
-  PATH="$root/no-tmux-bin:$PATH" \
-  "$script" --print-controller-command --pi "dev'box" >"$root/pi-quoted-command"
-python3 - "$root/pi-quoted-command" "$pi_socket" "$pi_rpc_dir" <<'PY'
-import pathlib, shlex, sys
-command = pathlib.Path(sys.argv[1]).read_text()
-assert command.count("\n") == 1
-assert shlex.split(command) == [
-    "tmux-remote-control", "attach", "dev'box", "--pi", "--tmux-socket", sys.argv[2],
-    "--tmux-server-pid", "123", "--session", "%42", "--rpc-dir", sys.argv[3],
-]
-PY
-# Run the generated command against an argv recorder as well as parsing it.
-TMUX_REMOTE_CONTROL_TEST_GENERATED="$(cat "$root/pi-quoted-command")" \
-  TMUX_REMOTE_CONTROL_TEST_ARGV="$root/generated-argv" bash -c '
-  tmux-remote-control() { printf "%s\0" "$@" >"$TMUX_REMOTE_CONTROL_TEST_ARGV"; }
-  eval "$TMUX_REMOTE_CONTROL_TEST_GENERATED"
-'
-python3 - "$root/generated-argv" "$pi_socket" "$pi_rpc_dir" <<'PY'
-import pathlib, sys
-assert pathlib.Path(sys.argv[1]).read_bytes().split(b"\0")[:-1] == [
-    x.encode() for x in ["attach", "dev'box", "--pi", "--tmux-socket", sys.argv[2],
-                        "--tmux-server-pid", "123", "--session", "%42", "--rpc-dir", sys.argv[3]]
-]
-PY
-TMUX= TMUX_PANE=%42 TMUX_REMOTE_CONTROL_TMUX_SOCKET=/tmp/override \
-  TMUX_REMOTE_CONTROL_TMUX_SERVER_PID=456 PATH="$root/no-tmux-bin:$PATH" \
-  "$script" --pi --print-controller-command devbox >"$root/pi-override-command"
-grep -F -- '--tmux-socket /tmp/override --tmux-server-pid 456' "$root/pi-override-command" >/dev/null
-expect_failure 'set both' env TMUX='/tmp/original,123,0' TMUX_PANE=%42 \
-  TMUX_REMOTE_CONTROL_TMUX_SOCKET=/tmp/override \
-  "$script" --pi --print-controller-command devbox
-expect_failure 'absolute path' env TMUX='/tmp/original,123,0' TMUX_PANE=%42 \
-  TMUX_REMOTE_CONTROL_RPC_DIR=relative "$script" --pi --print-controller-command devbox
-expect_failure 'tmux identity' env TMUX= TMUX_PANE=%42 "$script" --pi --print-controller-command devbox
-expect_failure 'tmux identity' env TMUX='/tmp/socket,123' TMUX_PANE=%42 "$script" --pi --print-controller-command devbox
-expect_failure 'tmux server PID' env TMUX='/tmp/socket,nope,0' TMUX_PANE=%42 "$script" --pi --print-controller-command devbox
-expect_failure 'tmux socket path' env TMUX='relative,123,0' TMUX_PANE=%42 "$script" --pi --print-controller-command devbox
-expect_failure 'run the launcher inside tmux' env TMUX='/tmp/socket,123,0' TMUX_PANE=nope "$script" --pi --print-controller-command devbox
-[[ ! -e "$root/unexpected-tmux-invocation" ]]
-expect_failure 'tmux socket path' "$script" attach example-host --pi --editor --once
-expect_failure 'tmux server PID' "$script" attach example-host --pi --tmux-socket /tmp/socket --editor --once
-expect_failure 'invalid tmux server PID' "$script" attach example-host --pi --tmux-socket /tmp/socket --tmux-server-pid 0 --editor --once
-
-assert_pi_submission() {
-  python3 - "$root/command" "$pi_socket" "$1" "$2" "${3:-}" <<'PY'
-import pathlib, shlex, sys
-outer = shlex.split(pathlib.Path(sys.argv[1]).read_text())
-assert outer[:2] == ["sh", "-c"] and len(outer) == 3, outer
-expected = ["tmux-remote-control", "pi-send", "--tmux-socket", sys.argv[2],
-            "--tmux-server-pid", "123", sys.argv[3], sys.argv[4]]
-if sys.argv[5]:
-    expected += ["--rpc-dir", sys.argv[5]]
-assert shlex.split(outer[2]) == expected, outer[2]
-assert "paste-buffer" not in outer[2] and "send-keys" not in outer[2]
-PY
-}
-
-# Discovery is socket-scoped, and Pi submission delegates only to the helper.
-: >"$TMUX_REMOTE_CONTROL_TEST_ALL_COMMANDS"
-"$script" attach example-host --pi --tmux-socket "$pi_socket" --tmux-server-pid 123 \
-  --rpc-dir "$pi_rpc_dir" --editor --once >"$root/pi-session-output"
-assert_pi_submission --session '$3' "$pi_rpc_dir"
-[[ "$(cat "$root/input")" == $'first line\nsecond line' ]]
-python3 - "$TMUX_REMOTE_CONTROL_TEST_ALL_COMMANDS" "$pi_socket" <<'PY'
-import pathlib, shlex, sys
-# list-sessions embeds tabs, but each invocation still occupies one line.
-commands = pathlib.Path(sys.argv[1]).read_text().splitlines()
-assert len(commands) == 3, commands
-assert shlex.split(commands[0])[:4] == ["tmux", "-S", sys.argv[2], "list-sessions"]
-assert shlex.split(commands[1])[:4] == ["tmux", "-S", sys.argv[2], "display-message"]
-PY
-TMUX_REMOTE_CONTROL_RPC_DIR="$pi_rpc_dir" \
-  "$script" attach example-host --pi --tmux-socket "$pi_socket" --tmux-server-pid 123 \
-  --target %7 --editor --once >"$root/pi-target-output"
-assert_pi_submission --target %7 "$pi_rpc_dir"
-TMUX_REMOTE_CONTROL_TMUX_SOCKET="$pi_socket" TMUX_REMOTE_CONTROL_TMUX_SERVER_PID=123 \
-  "$script" attach example-host --pi --session %7 --editor --once >/dev/null
-assert_pi_submission --session '$3'
-
-# An uncertain acknowledgement must neither retry nor delete the user's draft.
-: >"$TMUX_REMOTE_CONTROL_TEST_ALL_COMMANDS"
-expect_failure 'Draft saved to:' env TMUX_REMOTE_CONTROL_TEST_FAIL_PI_SEND=1 \
-  TMUX_REMOTE_CONTROL_TMPDIR="$root" "$script" attach example-host --pi \
-  --tmux-socket "$pi_socket" --tmux-server-pid 123 --target %7 --editor --once
-grep -F 'ambiguous; do not auto-retry' "$root/failure-error" >/dev/null
-saved_draft="$(grep -F 'Draft saved to:' "$root/failure-error")"
-saved_draft="${saved_draft##*Draft saved to: }"
-[[ -f "$saved_draft" ]]
-[[ "$(cat "$saved_draft")" == $'first line\nsecond line' ]]
-[[ "$(grep -c 'pi-send' "$TMUX_REMOTE_CONTROL_TEST_ALL_COMMANDS")" == 1 ]]
-! grep -E 'paste-buffer|send-keys|load-buffer' "$TMUX_REMOTE_CONTROL_TEST_ALL_COMMANDS" >/dev/null
-rm -f "$saved_draft"
 
 # Fixed-pane mode resolves the supplied target to a stable pane id. A long
 # macOS-style temporary path must not be used for the SSH control socket.
@@ -296,11 +175,7 @@ import time
 script = sys.argv[1]
 pid, fd = pty.fork()
 if pid == 0:
-    args = [script, "attach", "example-host", "--session", "%7", "--once"]
-    if os.environ.get("TMUX_REMOTE_CONTROL_TEST_PI") == "1":
-        args += ["--pi", "--tmux-socket", os.environ["TMUX_REMOTE_CONTROL_TEST_SOCKET"],
-                 "--tmux-server-pid", "123"]
-    os.execve(script, args, os.environ)
+    os.execve(script, [script, "attach", "example-host", "--session", "%7", "--once"], os.environ)
 
 output = bytearray()
 deadline = time.monotonic() + 10
@@ -461,38 +336,6 @@ tmux select-window -t '$3:9'
 EOF
 diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
 
-# The same navigation shortcuts in Pi mode must address the pinned server.
-: >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
-export TMUX_REMOTE_CONTROL_TEST_PI=1
-export TMUX_REMOTE_CONTROL_TEST_SOCKET="$pi_socket"
-while IFS= read -r navigation_key; do
-  run_in_pty "6b6565702074686973206472616674${navigation_key}" "0d"
-  [[ "$(cat "$root/input")" == "keep this draft" ]]
-  assert_pi_submission --session '$3'
-done < <(python3 - <<'PY'
-for key in "fhjklpn0123456789":
-    print(f"\x1b[{ord(key)};5u".encode().hex())
-PY
-)
-unset TMUX_REMOTE_CONTROL_TEST_PI TMUX_REMOTE_CONTROL_TEST_SOCKET
-python3 - "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS" "$pi_socket" <<'PY'
-import pathlib, shlex, sys
-expected = [shlex.split(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
-actual = [shlex.split(line) for line in pathlib.Path(sys.argv[2]).read_text().splitlines()]
-assert actual == [["tmux", "-S", sys.argv[3], *command[1:]] for command in expected], actual
-PY
-
-# Explicit sockets also scope every terminal submission command, including
-# focus resolution and the EXIT-trap cleanup. No flags leaves legacy unchanged.
-"$script" attach example-host --tmux-socket /tmp/terminal-socket --session %7 --editor --once >/dev/null
-python3 - "$root/command" "$root/query-command" <<'PY'
-import pathlib, shlex, sys
-submission = shlex.split(pathlib.Path(sys.argv[1]).read_text())[2]
-assert submission.count("tmux -S '/tmp/terminal-socket'") == 5, submission
-assert "tmux " not in submission.replace("tmux -S '/tmp/terminal-socket'", "")
-assert shlex.split(pathlib.Path(sys.argv[2]).read_text())[:3] == ["tmux", "-S", "/tmp/terminal-socket"]
-PY
-
 list_output="$("$script" attach example-host --list)"
 [[ "$list_output" == *'$3'* ]]
 [[ "$list_output" == *"work"* ]]
@@ -507,110 +350,6 @@ if TMUX_REMOTE_CONTROL_TEST_NO_SESSIONS=1 /bin/bash "$script" attach example-hos
   exit 1
 fi
 grep -F 'no tmux sessions found' "$root/no-sessions-error" >/dev/null
-
-# Exercise the actual helper and executable dispatch through npm-style and
-# ~/bin symlinks. Only tmux and RPC delivery are mocked; identity/runtime parsing
-# uses the real library so its normalized paths and numeric PID stay compatible.
-helper_package="$root/helper-package"
-mkdir -p "$helper_package/bin" "$helper_package/lib" "$root/helper-mocks" \
-  "$root/npm/bin" "$root/npm/lib/node_modules" "$root/home/bin"
-cp "$script" "$helper_package/bin/tmux-remote-control"
-cp "$project_root/bin/tmux-remote-control-pi.cjs" "$helper_package/bin/"
-cat >"$helper_package/lib/pi-remote.cjs" <<'JS'
-const fs = require('node:fs');
-const real = require(process.env.TMUX_REMOTE_CONTROL_TEST_REAL_LIB);
-exports.getIdentity = env => {
-  fs.writeFileSync(process.env.TMUX_REMOTE_CONTROL_TEST_IDENTITY_ENV, JSON.stringify(env));
-  return process.env.TMUX_REMOTE_CONTROL_TEST_BAD_IDENTITY === '1' ? null : real.getIdentity(env);
-};
-exports.getRuntimeDir = real.getRuntimeDir;
-exports.sendToPane = async options => {
-  fs.writeFileSync(process.env.TMUX_REMOTE_CONTROL_TEST_RPC_REQUEST, JSON.stringify(options));
-  if (process.env.TMUX_REMOTE_CONTROL_TEST_RPC_FAIL === '1') throw new Error('RPC acknowledgement timed out');
-};
-JS
-cat >"$root/helper-mocks/tmux" <<'JS'
-#!/usr/bin/env node
-const fs = require('node:fs');
-fs.appendFileSync(process.env.TMUX_REMOTE_CONTROL_TEST_TMUX_CALLS, JSON.stringify(process.argv.slice(2)) + '\n');
-if (process.env.TMUX_REMOTE_CONTROL_TEST_TMUX_FAIL === '1') {
-  console.error('mock tmux socket unavailable');
-  process.exit(1);
-}
-process.stdout.write(process.env.TMUX_REMOTE_CONTROL_TEST_SNAPSHOT + '\n');
-JS
-chmod +x "$root/helper-mocks/tmux"
-ln -s "$helper_package" "$root/npm/lib/node_modules/tmux-remote-control"
-ln -s ../lib/node_modules/tmux-remote-control/bin/tmux-remote-control "$root/npm/bin/tmux-remote-control"
-ln -s "$root/npm/bin/tmux-remote-control" "$root/home/bin/tmux-remote-control"
-export TMUX_REMOTE_CONTROL_TEST_REAL_LIB="$project_root/lib/pi-remote.cjs"
-export TMUX_REMOTE_CONTROL_TEST_IDENTITY_ENV="$root/identity-env"
-export TMUX_REMOTE_CONTROL_TEST_RPC_REQUEST="$root/rpc-request"
-export TMUX_REMOTE_CONTROL_TEST_TMUX_CALLS="$root/tmux-calls"
-export TMUX_REMOTE_CONTROL_TEST_SNAPSHOT="$pi_socket"$'\t123\t%19'
-printf 'raw prompt: \047quotes\047, $(not a command)\nsecond line\n' >"$root/helper-prompt"
-for executable in "$root/npm/bin/tmux-remote-control" "$root/home/bin/tmux-remote-control"; do
-  : >"$TMUX_REMOTE_CONTROL_TEST_TMUX_CALLS"
-  PATH="$root/helper-mocks:$PATH" TMUX='/wrong,999,0' TMUX_PANE=%999 \
-    TMUX_REMOTE_CONTROL_TMUX_SOCKET=/wrong TMUX_REMOTE_CONTROL_TMUX_SERVER_PID=999 \
-    "$executable" pi-send --tmux-socket "$pi_socket" --tmux-server-pid 123 \
-    --session '$3' --rpc-dir "$pi_rpc_dir" <"$root/helper-prompt"
-  python3 - "$root" "$pi_socket" "$pi_rpc_dir" <<'PY'
-import json, pathlib, sys
-root = pathlib.Path(sys.argv[1])
-calls = [json.loads(line) for line in (root / "tmux-calls").read_text().splitlines()]
-assert calls == [["-S", sys.argv[2], "display-message", "-p", "-t", "$3", "#{socket_path}\t#{pid}\t#{pane_id}"]], calls
-request = json.loads((root / "rpc-request").read_text())
-assert request["identity"]["socketPath"] == sys.argv[2]
-assert request["identity"]["serverPid"] == 123
-assert request["identity"]["paneId"] == "%19"
-assert request["identity"]["serverKey"]
-assert request["runtimeDir"] == sys.argv[3]
-assert request["text"] == (root / "helper-prompt").read_text()
-assert request["deliverAs"] == "steer" and request["timeoutMs"] == 5000
-assert json.loads((root / "identity-env").read_text()) == {"TMUX": sys.argv[2] + ",123,0", "TMUX_PANE": "%19"}
-PY
-done
-helper_command=(env "PATH=$root/helper-mocks:$PATH" "$helper_package/bin/tmux-remote-control" pi-send)
-: >"$TMUX_REMOTE_CONTROL_TEST_TMUX_CALLS"
-TMUX_REMOTE_CONTROL_RPC_DIR="$pi_rpc_dir" "${helper_command[@]}" \
-  --tmux-socket "$pi_socket" --tmux-server-pid 123 --target %19 <"$root/helper-prompt"
-python3 - "$root" "$pi_rpc_dir" <<'PY'
-import json, pathlib, sys
-root = pathlib.Path(sys.argv[1])
-assert json.loads((root / "tmux-calls").read_text())[5] == "%19"
-assert json.loads((root / "rpc-request").read_text())["runtimeDir"] == sys.argv[2]
-PY
-expect_failure 'tmux socket path' "${helper_command[@]}" --tmux-server-pid 123 --target %19
-expect_failure 'tmux server PID' "${helper_command[@]}" --tmux-socket "$pi_socket" --target %19
-expect_failure 'stable tmux session ID' "${helper_command[@]}" --tmux-socket "$pi_socket" --tmux-server-pid 123 --session work
-expect_failure 'exactly one' "${helper_command[@]}" --tmux-socket "$pi_socket" --tmux-server-pid 123 --session '$3' --target %19
-expect_failure 'prompt is empty' "${helper_command[@]}" --tmux-socket "$pi_socket" --tmux-server-pid 123 --target %19 </dev/null
-rm -f "$root/rpc-request"
-: >"$TMUX_REMOTE_CONTROL_TEST_TMUX_CALLS"
-expect_failure 'server PID changed' "${helper_command[@]}" --tmux-socket "$pi_socket" --tmux-server-pid 456 --target %19 <"$root/helper-prompt"
-[[ ! -e "$root/rpc-request" ]]
-[[ "$(wc -l <"$TMUX_REMOTE_CONTROL_TEST_TMUX_CALLS")" -eq 1 ]]
-TMUX_REMOTE_CONTROL_TEST_SNAPSHOT=$'/tmp/socket\t123\tbroken' \
-  expect_failure 'invalid server/pane identity' "${helper_command[@]}" --tmux-socket "$pi_socket" --tmux-server-pid 123 --target %19 <"$root/helper-prompt"
-TMUX_REMOTE_CONTROL_TEST_TMUX_FAIL=1 \
-  expect_failure 'mock tmux socket unavailable' "${helper_command[@]}" --tmux-socket "$pi_socket" --tmux-server-pid 123 --target %19 <"$root/helper-prompt"
-TMUX_REMOTE_CONTROL_TEST_BAD_IDENTITY=1 \
-  expect_failure 'could not construct' "${helper_command[@]}" --tmux-socket "$pi_socket" --tmux-server-pid 123 --target %19 <"$root/helper-prompt"
-[[ ! -e "$root/rpc-request" ]]
-TMUX_REMOTE_CONTROL_TEST_RPC_FAIL=1 \
-  expect_failure 'RPC acknowledgement timed out' "${helper_command[@]}" --tmux-socket "$pi_socket" --tmux-server-pid 123 --target %19 <"$root/helper-prompt"
-rm -f "$root/rpc-request"
-: >"$TMUX_REMOTE_CONTROL_TEST_TMUX_CALLS"
-python3 - "$root/oversized-prompt" <<'PY'
-import pathlib, sys
-pathlib.Path(sys.argv[1]).write_bytes(b"x" * (1024 * 1024 + 1))
-PY
-expect_failure '1 MiB stdin limit' "${helper_command[@]}" --tmux-socket "$pi_socket" --tmux-server-pid 123 --target %19 <"$root/oversized-prompt"
-[[ ! -s "$TMUX_REMOTE_CONTROL_TEST_TMUX_CALLS" && ! -e "$root/rpc-request" ]]
-printf '\377' >"$root/invalid-utf8"
-expect_failure 'not valid UTF-8' "${helper_command[@]}" --tmux-socket "$pi_socket" --tmux-server-pid 123 --target %19 <"$root/invalid-utf8"
-[[ ! -s "$TMUX_REMOTE_CONTROL_TEST_TMUX_CALLS" && ! -e "$root/rpc-request" ]]
 
 # Exercise focus following against tmux itself. Start on one window, switch to
 # another in the editor, and verify that input reaches only the new window.
@@ -666,12 +405,10 @@ SH
   chmod +x "$root/bin/ssh" "$root/bin/editor"
 
   test_tmux_socket="tmux-remote-control-test-$$"
-  # These test pane programs are POSIX shell snippets, even when the account's
-  # default shell is Fish (the SSH mock still exercises that login shell).
   tmux -L "$test_tmux_socket" -f /dev/null new-session -d -s "test session" -n first \
-    /bin/sh -c "IFS= read -r line; printf '%s' \"\$line\" >'$root/pane-first'"
+    "IFS= read -r line; printf '%s' \"\$line\" >'$root/pane-first'"
   tmux -L "$test_tmux_socket" new-window -d -t "test session:" -n second \
-    /bin/sh -c "IFS= read -r line; printf '%s' \"\$line\" >'$root/pane-second'"
+    "IFS= read -r line; printf '%s' \"\$line\" >'$root/pane-second'"
   launcher_pane="$(tmux -L "$test_tmux_socket" display-message -p -t 'test session:first' '#{pane_id}')"
   destination="$(tmux -L "$test_tmux_socket" display-message -p -t 'test session:second' '#{pane_id}')"
   socket_path="$(tmux -L "$test_tmux_socket" display-message -p -t 'test session' '#{socket_path}')"

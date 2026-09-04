@@ -5,23 +5,15 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")" && pwd)"
 extensions_dir="$HOME/.pi/agent/extensions"
-destination="$extensions_dir/tmux-remote-control"
+destination="$extensions_dir/tmux-remote-control.ts"
 
-# Keep the extension and its transport together so the installation does not
-# depend on the repository staying at the same path.
-mkdir -p "$destination/lib"
-temporary="$(mktemp "$destination/.install.XXXXXX")"
+mkdir -p "$extensions_dir"
+temporary="$(mktemp "$extensions_dir/.tmux-remote-control.XXXXXX")"
 trap 'rm -f "$temporary"' EXIT
-cp "$root/lib/pi-remote.cjs" "$temporary"
-chmod 0644 "$temporary"
-mv -f "$temporary" "$destination/lib/pi-remote.cjs"
-temporary="$(mktemp "$destination/.install.XXXXXX")"
+
 cp "$root/pi-extension.ts" "$temporary"
 chmod 0644 "$temporary"
-mv -f "$temporary" "$destination/index.ts"
-# Remove the old discovery entry only after both new files are installed.
-# rm unlinks legacy symlinks; it does not overwrite their targets.
-rm -f "$extensions_dir/tmux-remote-control.ts"
+mv -f "$temporary" "$destination"
 trap - EXIT
 
-printf 'Installed Pi extension at %s/index.ts\nRun /reload in Pi to load it.\n' "$destination"
+printf 'Installed Pi extension at %s\nRun /reload in Pi to load it.\n' "$destination"

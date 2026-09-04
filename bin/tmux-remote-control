@@ -5,8 +5,7 @@ usage() {
   cat <<'EOF'
 Usage:
   tmux-remote-control [HOST]
-  tmux-remote-control --print-controller-command [--pi] [HOST]
-  tmux-remote-control --pi [HOST]
+  tmux-remote-control --print-controller-command [HOST]
   tmux-remote-control attach HOST [SESSION]
   tmux-remote-control attach --host HOST [--session SESSION_OR_PANE | --target PANE]
   tmux-remote-control attach HOST --list
@@ -26,18 +25,11 @@ Environment:
   TMUX_REMOTE_CONTROL_SESSION   Default tmux session selector
   TMUX_REMOTE_CONTROL_TARGET    Default fixed tmux pane target
   TMUX_REMOTE_CONTROL_EDITOR    Editor command; falls back to VISUAL, EDITOR, then vi
-  TMUX_REMOTE_CONTROL_TMUX_SOCKET      Pi server socket override (launcher/attach)
-  TMUX_REMOTE_CONTROL_TMUX_SERVER_PID  Pi server PID override (launcher/attach)
-  TMUX_REMOTE_CONTROL_RPC_DIR          Pi RPC runtime directory override
 
 Remote launcher:
   HOST                SSH host or local SSH config alias; defaults to the short hostname
 
 Attach options:
-  --pi                Send prompts to Pi as steering messages, never terminal paste
-  --tmux-socket PATH   Address this remote tmux server for every operation
-  --tmux-server-pid PID  Expected tmux server PID (required with --pi)
-  --rpc-dir PATH      Pi RPC runtime directory on the remote host
   --session TARGET    Follow the active pane in TARGET's tmux session
   --target PANE       Always submit to one fixed pane
   --list              List tmux sessions on the remote host
@@ -78,24 +70,12 @@ shell_word() {
   fi
 }
 
-validate_server_identity() {
-  [[ "$1" == /* && "$1" != *[[:cntrl:]]* ]] || \
-    die "invalid or missing tmux socket path (use --tmux-socket or TMUX_REMOTE_CONTROL_TMUX_SOCKET)"
-  [[ "$2" =~ ^[1-9][0-9]*$ ]] || \
-    die "invalid or missing tmux server PID (use --tmux-server-pid or TMUX_REMOTE_CONTROL_TMUX_SERVER_PID)"
-}
-
 copy_controller_command() {
   local launcher_host="${TMUX_REMOTE_CONTROL_HOST:-}"
   local launcher_host_set="false"
   local print_controller_command="false"
-  local launcher_pi="false"
   while (($# > 0)); do
     case "$1" in
-      --pi)
-        launcher_pi="true"
-        shift
-        ;;
       --print-controller-command)
         print_controller_command="true"
         shift
@@ -135,37 +115,6 @@ copy_controller_command() {
     die "run the launcher inside tmux so TMUX_PANE identifies the current pane"
 
   local controller_command
-  if [[ "$launcher_pi" == "true" ]]; then
-    local socket="${TMUX_REMOTE_CONTROL_TMUX_SOCKET:-}"
-    local server_pid="${TMUX_REMOTE_CONTROL_TMUX_SERVER_PID:-}"
-    local tmux_prefix
-    if [[ -n "${TMUX_REMOTE_CONTROL_TMUX_SOCKET+x}" || -n "${TMUX_REMOTE_CONTROL_TMUX_SERVER_PID+x}" ]]; then
-      [[ -n "$socket" && -n "$server_pid" ]] || \
-        die "set both TMUX_REMOTE_CONTROL_TMUX_SOCKET and TMUX_REMOTE_CONTROL_TMUX_SERVER_PID"
-    else
-      # Split from the right: Unix socket paths can themselves contain commas.
-      [[ "${TMUX:-}" == *,*,* && "${TMUX##*,}" =~ ^[0-9]+$ ]] || \
-        die "missing or invalid tmux identity: set TMUX or both TMUX_REMOTE_CONTROL_TMUX_SOCKET and TMUX_REMOTE_CONTROL_TMUX_SERVER_PID"
-      tmux_prefix="${TMUX%,*}"
-      socket="${socket:-${tmux_prefix%,*}}"
-      server_pid="${server_pid:-${tmux_prefix##*,}}"
-    fi
-    validate_server_identity "$socket" "$server_pid"
-    controller_command="tmux-remote-control attach $(shell_word "$launcher_host") --pi --tmux-socket $(shell_word "$socket") --tmux-server-pid $(shell_word "$server_pid") --session $(shell_word "$pane")"
-    if [[ -n "${TMUX_REMOTE_CONTROL_RPC_DIR:-}" ]]; then
-      [[ "$TMUX_REMOTE_CONTROL_RPC_DIR" == /* && "$TMUX_REMOTE_CONTROL_RPC_DIR" != *[[:cntrl:]]* ]] || die "invalid RPC directory: expected an absolute path"
-      controller_command+=" --rpc-dir $(shell_word "$TMUX_REMOTE_CONTROL_RPC_DIR")"
-    fi
-    if [[ "$print_controller_command" == "true" ]]; then
-      printf '%s\n' "$controller_command"
-    elif printf '%s' "$controller_command" | tmux -S "$socket" load-buffer -w -; then
-      printf 'Copied controller command to the local clipboard:\n%s\n' "$controller_command"
-    else
-      printf 'Could not copy through tmux. Copy this controller command manually:\n%s\n' \
-        "$controller_command" >&2
-    fi
-    return
-  fi
   if [[ "$print_controller_command" == "true" ]]; then
     # Pi may run inside a sandbox that forwards TMUX_PANE but deliberately
     # blocks the tmux server socket. Attach mode accepts a pane as a session
@@ -192,19 +141,6 @@ copy_controller_command() {
 }
 
 case "${1:-}" in
-  pi-send)
-    shift
-    # npm and ~/bin commonly expose this executable through symlinks. Resolve
-    # each link before looking up the adjacent helper, including relative links.
-    executable="${BASH_SOURCE[0]}"
-    while [[ -L "$executable" ]]; do
-      executable_dir="$(cd -P "$(dirname "$executable")" && pwd)"
-      executable="$(readlink "$executable")"
-      [[ "$executable" == /* ]] || executable="$executable_dir/$executable"
-    done
-    executable_dir="$(cd -P "$(dirname "$executable")" && pwd)"
-    exec node "$executable_dir/tmux-remote-control-pi.cjs" "$@"
-    ;;
   attach)
     shift
     ;;
@@ -226,35 +162,9 @@ explicit_session="false"
 action="compose"
 loop="true"
 editor_first="false"
-pi_mode="false"
-tmux_socket=""
-tmux_server_pid=""
-rpc_dir=""
 
 while (($# > 0)); do
   case "$1" in
-    --pi)
-      pi_mode="true"
-      shift
-      ;;
-    --tmux-socket)
-      (($# >= 2)) || die "--tmux-socket requires a value"
-      [[ -n "$2" ]] || die "--tmux-socket requires a nonempty value"
-      tmux_socket="$2"
-      shift 2
-      ;;
-    --tmux-server-pid)
-      (($# >= 2)) || die "--tmux-server-pid requires a value"
-      [[ "$2" =~ ^[1-9][0-9]*$ ]] || die "invalid tmux server PID: $2"
-      tmux_server_pid="$2"
-      shift 2
-      ;;
-    --rpc-dir)
-      (($# >= 2)) || die "--rpc-dir requires a value"
-      [[ "$2" == /* && "$2" != *[[:cntrl:]]* ]] || die "invalid RPC directory: expected an absolute path"
-      rpc_dir="$2"
-      shift 2
-      ;;
     --host)
       (($# >= 2)) || die "--host requires a value"
       host="$2"
@@ -319,19 +229,6 @@ while (($# > 0)); do
   esac
 done
 
-if [[ "$pi_mode" == "true" ]]; then
-  tmux_socket="${tmux_socket:-${TMUX_REMOTE_CONTROL_TMUX_SOCKET:-}}"
-  tmux_server_pid="${tmux_server_pid:-${TMUX_REMOTE_CONTROL_TMUX_SERVER_PID:-}}"
-  rpc_dir="${rpc_dir:-${TMUX_REMOTE_CONTROL_RPC_DIR:-}}"
-  validate_server_identity "$tmux_socket" "$tmux_server_pid"
-  [[ -z "$rpc_dir" || ( "$rpc_dir" == /* && "$rpc_dir" != *[[:cntrl:]]* ) ]] || die "invalid RPC directory: expected an absolute path"
-fi
-remote_tmux="tmux"
-if [[ -n "$tmux_socket" ]]; then
-  [[ "$tmux_socket" == /* && "$tmux_socket" != *[[:cntrl:]]* ]] || die "invalid tmux socket path"
-  remote_tmux+=" -S $(shell_quote "$tmux_socket")"
-fi
-
 [[ -n "$host" ]] || die "SSH host is required (argument, --host, or TMUX_REMOTE_CONTROL_HOST)"
 [[ "$host" != -* && "$host" != *[[:space:]]* && "$host" != *[[:cntrl:]]* ]] || \
   die "invalid SSH host: $host"
@@ -380,18 +277,11 @@ control_path="$control_dir/c"
 ssh_args=(-o ControlMaster=auto -o ControlPersist=10m -o "ControlPath=$control_path")
 prompt_file=""
 prompt_action_file=""
-preserve_pi_draft="false"
 choices=""
 cleanup() {
   ssh -o "ControlPath=$control_path" -O exit "$host" >/dev/null 2>&1 || true
   rm -f "$session_file" "$query_file"
-  if [[ -n "$prompt_file" ]]; then
-    if [[ "$preserve_pi_draft" == "true" ]]; then
-      printf 'tmux-remote-control: Pi delivery may be ambiguous; do not auto-retry. Draft saved to: %s\n' "$prompt_file" >&2
-    else
-      rm -f "$prompt_file"
-    fi
-  fi
+  [[ -z "$prompt_file" ]] || rm -f "$prompt_file"
   [[ -z "$prompt_action_file" ]] || rm -f "$prompt_action_file"
   [[ -z "$choices" ]] || rm -f "$choices"
   rm -rf "$control_dir"
@@ -405,7 +295,7 @@ if [[ "$action" == "list" || ( -z "$session_target" && -z "$target" ) ]]; then
   session_format=$'#{session_id}\t#{session_name}\t#{session_windows}\t#{session_attached}'
   quoted_session_format="$(shell_quote "$session_format")"
   ssh "${ssh_args[@]}" -T "$host" \
-    "$remote_tmux list-sessions -F $quoted_session_format" \
+    "tmux list-sessions -F $quoted_session_format" \
     >"$session_file" || die "could not list tmux sessions on $host"
 
   while IFS=$'\t' read -r session_id session_name window_count attached_count; do
@@ -456,7 +346,7 @@ if [[ -n "$session_target" ]]; then
   validate_tmux_target "$session_target"
   quoted_session_target="$(shell_quote "$session_target")"
   ssh "${ssh_args[@]}" -T "$host" \
-    "$remote_tmux display-message -p -t $quoted_session_target '#{session_id}|#{session_name}'" \
+    "tmux display-message -p -t $quoted_session_target '#{session_id}|#{session_name}'" \
     >"$query_file" || die "could not find tmux session for $session_target on $host"
   IFS='|' read -r session_id session_name <"$query_file" || true
   [[ "$session_id" =~ ^\$[0-9]+$ && -n "$session_name" && "$session_name" != *[[:cntrl:]]* ]] || \
@@ -465,7 +355,7 @@ else
   validate_tmux_target "$target"
   quoted_target="$(shell_quote "$target")"
   ssh "${ssh_args[@]}" -T "$host" \
-    "$remote_tmux display-message -p -t $quoted_target '#{pane_id}|#{session_name}:#{window_index}.#{pane_index}'" \
+    "tmux display-message -p -t $quoted_target '#{pane_id}|#{session_name}:#{window_index}.#{pane_index}'" \
     >"$query_file" || die "could not find tmux pane $target on $host"
   IFS='|' read -r pane_id pane_location <"$query_file" || true
   [[ "$pane_id" =~ ^%[0-9]+$ && -n "$pane_location" && "$pane_location" != *[[:cntrl:]]* ]] || \
@@ -493,15 +383,15 @@ run_navigation_action() {
   fi
 
   case "$key_action" in
-    pane-zoom) navigation_command="$remote_tmux resize-pane -Z -t $(shell_quote "$session_id")" ;;
-    pane-down) navigation_command="$remote_tmux select-pane -t $(shell_quote "$session_id") -D" ;;
-    pane-left) navigation_command="$remote_tmux select-pane -t $(shell_quote "$session_id") -L" ;;
-    pane-right) navigation_command="$remote_tmux select-pane -t $(shell_quote "$session_id") -R" ;;
-    pane-up) navigation_command="$remote_tmux select-pane -t $(shell_quote "$session_id") -U" ;;
-    window-previous) navigation_command="$remote_tmux select-window -t $(shell_quote "$session_id") -p" ;;
-    window-next) navigation_command="$remote_tmux select-window -t $(shell_quote "$session_id") -n" ;;
+    pane-zoom) navigation_command="tmux resize-pane -Z -t $(shell_quote "$session_id")" ;;
+    pane-down) navigation_command="tmux select-pane -t $(shell_quote "$session_id") -D" ;;
+    pane-left) navigation_command="tmux select-pane -t $(shell_quote "$session_id") -L" ;;
+    pane-right) navigation_command="tmux select-pane -t $(shell_quote "$session_id") -R" ;;
+    pane-up) navigation_command="tmux select-pane -t $(shell_quote "$session_id") -U" ;;
+    window-previous) navigation_command="tmux select-window -t $(shell_quote "$session_id") -p" ;;
+    window-next) navigation_command="tmux select-window -t $(shell_quote "$session_id") -n" ;;
     window-[0-9])
-      navigation_command="$remote_tmux select-window -t $(shell_quote "$session_id:${key_action#window-}")"
+      navigation_command="tmux select-window -t $(shell_quote "$session_id:${key_action#window-}")"
       ;;
     *)
       die "internal error: unknown key action $key_action"
@@ -566,33 +456,20 @@ while :; do
     exit 0
   fi
 
-  if [[ "$pi_mode" == "true" ]]; then
-    remote_command="tmux-remote-control pi-send --tmux-socket $(shell_quote "$tmux_socket") --tmux-server-pid $(shell_quote "$tmux_server_pid")"
-    if [[ -n "$session_id" ]]; then
-      remote_command+=" --session $(shell_quote "$session_id")"
-    else
-      remote_command+=" --target $(shell_quote "$pane_id")"
-    fi
-    if [[ -n "$rpc_dir" ]]; then
-      remote_command+=" --rpc-dir $(shell_quote "$rpc_dir")"
-    fi
+  buffer_name="tmux-remote-control-$$-${RANDOM:-0}"
+  cleanup_command="buffer_loaded=false; cleanup_buffer() { if [ \"\$buffer_loaded\" = true ]; then tmux delete-buffer -b '$buffer_name' >/dev/null 2>&1 || true; fi; }; trap cleanup_buffer EXIT"
+  if [[ -n "$session_id" ]]; then
+    remote_command="$cleanup_command; focused_pane=\$(tmux display-message -p -t '$session_id' '#{pane_id}') && test -n \"\$focused_pane\" && tmux load-buffer -b '$buffer_name' - && buffer_loaded=true && tmux paste-buffer -p -r -b '$buffer_name' -t \"\$focused_pane\" && tmux send-keys -t \"\$focused_pane\" Enter"
   else
-    buffer_name="tmux-remote-control-$$-${RANDOM:-0}"
-    cleanup_command="buffer_loaded=false; cleanup_buffer() { if [ \"\$buffer_loaded\" = true ]; then $remote_tmux delete-buffer -b '$buffer_name' >/dev/null 2>&1 || true; fi; }; trap cleanup_buffer EXIT"
-    if [[ -n "$session_id" ]]; then
-      remote_command="$cleanup_command; focused_pane=\$($remote_tmux display-message -p -t '$session_id' '#{pane_id}') && test -n \"\$focused_pane\" && $remote_tmux load-buffer -b '$buffer_name' - && buffer_loaded=true && $remote_tmux paste-buffer -p -r -b '$buffer_name' -t \"\$focused_pane\" && $remote_tmux send-keys -t \"\$focused_pane\" Enter"
-    else
-      remote_command="$cleanup_command; $remote_tmux load-buffer -b '$buffer_name' - && buffer_loaded=true && $remote_tmux paste-buffer -p -r -b '$buffer_name' -t '$pane_id' && $remote_tmux send-keys -t '$pane_id' Enter"
-    fi
+    remote_command="$cleanup_command; tmux load-buffer -b '$buffer_name' - && buffer_loaded=true && tmux paste-buffer -p -r -b '$buffer_name' -t '$pane_id' && tmux send-keys -t '$pane_id' Enter"
   fi
   # SSH asks the account's login shell to parse its command. Run the compound
   # submission explicitly with POSIX sh so Fish, Nushell, and other login
   # shells never parse assignments, functions, traps, or command substitutions.
   remote_command="sh -c $(shell_quote "$remote_command")"
 
-  send_prompt() {
-    if [[ "$trim_editor_newline" == "true" ]]; then
-      node - "$prompt_file" <<'NODE' | ssh "${ssh_args[@]}" -T "$host" "$remote_command"
+  if [[ "$trim_editor_newline" == "true" ]]; then
+    node - "$prompt_file" <<'NODE' | ssh "${ssh_args[@]}" -T "$host" "$remote_command"
 const fs = require("node:fs");
 let content = fs.readFileSync(process.argv[2]);
 if (content.length > 0 && content[content.length - 1] === 0x0a) {
@@ -603,21 +480,8 @@ if (content.length > 0 && content[content.length - 1] === 0x0a) {
 }
 process.stdout.write(content);
 NODE
-    else
-      ssh "${ssh_args[@]}" -T "$host" "$remote_command" <"$prompt_file"
-    fi
-  }
-
-  if [[ "$pi_mode" == "true" ]]; then
-    # Keep the file even on an SSH disconnect or interrupted acknowledgement:
-    # a failed command does not prove that Pi did not receive the prompt.
-    preserve_pi_draft="true"
-    if ! send_prompt; then
-      die "Pi submission failed"
-    fi
-    preserve_pi_draft="false"
   else
-    send_prompt
+    ssh "${ssh_args[@]}" -T "$host" "$remote_command" <"$prompt_file"
   fi
 
   rm -f "$prompt_file"
