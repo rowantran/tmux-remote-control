@@ -17,20 +17,19 @@
     "remote-control",
     "pi-package"
   ],
+  "dependencies": {
+    "@earendil-works/pi-tui": "^0.84.4"
+  },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*"
+    "@earendil-works/pi-coding-agent": "*"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-coding-agent": {
       "optional": true
-    },
-    "@earendil-works/pi-tui": {
-      "optional": true
     }
   },
   "scripts": {
-    "check": "bash -n bin/tmux-remote-control install-pi-extension.sh",
+    "check": "bash -n bin/tmux-remote-control install-pi-extension.sh && node --check bin/tmux-remote-control-prompt.mjs",
     "install:pi": "./install-pi-extension.sh",
     "test": "bash test/tmux-remote-control.test.sh",
     "verify": "npm run check && npm test"

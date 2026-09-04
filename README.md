@@ -54,7 +54,7 @@ Local device:
 
 - Bash
 - OpenSSH
-- Node.js for trimming the final newline added by external editors
+- Node.js 22.19 or newer for the inline prompt and editor submission handling
 - `fzf` is optional and provides the session selector when several sessions exist
 
 Remote machine:
@@ -161,7 +161,7 @@ tmux-remote-control attach devbox work --once
 
 ## Local input
 
-Attach mode clears the current terminal screen, shows the remote target at the top, and keeps the inline readline prompt directly below it:
+Attach mode clears the current terminal screen, shows the remote target at the top, and keeps the inline prompt directly below it. The prompt uses Pi's `@earendil-works/pi-tui` input component, including its standard terminal editing behavior:
 
 ```text
 [controlling: devbox -> work]
@@ -171,6 +171,13 @@ Attach mode clears the current terminal screen, shows the remote target at the t
 Controls:
 
 - `Enter`: submit the current line
+- `Alt-Left` / `Alt-Right` or `Ctrl-Left` / `Ctrl-Right`: move by one word
+- `Alt-Backspace` or `Ctrl-W`: delete the previous word
+- `Alt-Delete` or `Alt-D`: delete the next word
+- `Ctrl-A` / `Ctrl-E`: move to the start or end of the line
+- `Ctrl-U`: delete to the start of the line
+- `Ctrl-Y` / `Alt-Y`: paste or cycle through deleted text
+- `Ctrl--`: undo
 - `Ctrl-G`: open the current draft in an external editor, then submit when the editor exits
 - `Ctrl-F`: toggle zoom for the focused pane
 - `Ctrl-H`: select the pane below
@@ -182,9 +189,9 @@ Controls:
 - `Ctrl-C`: discard the current draft and show a clean prompt
 - `Ctrl-D`: close the controller, even when the current draft is not empty
 
-Pane and window shortcuts work when the controller follows a session. They keep the current draft at the prompt and use the same SSH control connection as submissions. Fixed-pane mode ignores them and rings the terminal bell because that mode stays pinned to one pane.
+The controller shortcuts take precedence when they overlap a standard editing key. Pane and window shortcuts work when the controller follows a session. They keep the current draft at the prompt and use the same SSH control connection as submissions. Fixed-pane mode ignores them and rings the terminal bell because that mode stays pinned to one pane.
 
-The prompt temporarily asks compatible terminals for distinct control-key sequences. This distinction is necessary because traditional terminal input cannot tell some `Ctrl-number` keys apart from other control keys. Unsupported terminals can still use the pane shortcuts except `Ctrl-J`, plus `Ctrl-P` and `Ctrl-N`.
+The Pi TUI library negotiates the terminal keyboard protocol and normalizes legacy and extended key sequences. Distinct sequences are necessary because traditional terminal input cannot tell some `Ctrl-number` keys apart from other control keys. Unsupported terminals can still use the pane shortcuts except `Ctrl-J`, plus `Ctrl-P` and `Ctrl-N`.
 
 Pressing Enter on an empty prompt shows another prompt. Use `--editor` to open the external editor immediately. Add `--once` with `--editor` if the editor should open only once.
 

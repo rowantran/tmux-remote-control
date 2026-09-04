@@ -179,23 +179,25 @@ deadline = time.monotonic() + 10
 sent = False
 after_prompt_keys = os.environ["TMUX_REMOTE_CONTROL_TEST_KEYS_AFTER_PROMPT"]
 sent_after_prompt = not after_prompt_keys
-keyboard_marker = b"\x1b[>1u"
+keyboard_marker_prefix = b"\x1b[>"
 
 def prompt_count(data: bytearray) -> int:
-    # Readline may enable bracketed paste between our keyboard-mode request and
-    # the visible prompt. Count only markers that are followed by a prompt,
-    # without requiring those byte sequences to be adjacent.
+    # ProcessTerminal negotiates the best available keyboard protocol. Count
+    # each negotiation request that is followed by a rendered input prompt.
     count = 0
     start = 0
     while True:
-        marker = data.find(keyboard_marker, start)
+        marker = data.find(keyboard_marker_prefix, start)
         if marker < 0:
             return count
-        next_marker = data.find(keyboard_marker, marker + len(keyboard_marker))
+        marker_end = data.find(b"u", marker + len(keyboard_marker_prefix))
+        if marker_end < 0:
+            return count
+        next_marker = data.find(keyboard_marker_prefix, marker_end + 1)
         end = len(data) if next_marker < 0 else next_marker
-        if b"> " in data[marker + len(keyboard_marker):end]:
+        if b"> " in data[marker_end + 1:end]:
             count += 1
-        start = marker + len(keyboard_marker)
+        start = marker_end + 1
 
 while time.monotonic() < deadline:
     ready, _, _ = select.select([fd], [], [], 0.1)
@@ -232,12 +234,12 @@ header = b"\x1b[2J\x1b[H[controlling: example-host -> work]\r\n"
 if header not in output:
     sys.stderr.buffer.write(output)
     raise SystemExit("controller header was not displayed at the top of a clear screen")
-if b"\x1b[1A\r\x1b[2K" not in output:
+if b"\r\x1b[2K" not in output:
     sys.stderr.buffer.write(output)
     raise SystemExit("submitted inline prompt was not cleared")
-if b"\x1b[>1u" not in output or b"\x1b[<u" not in output:
+if keyboard_marker_prefix not in output or b"\x1b[<u" not in output:
     sys.stderr.buffer.write(output)
-    raise SystemExit("extended keyboard mode was not enabled and restored")
+    raise SystemExit("terminal keyboard mode was not negotiated and restored")
 PY
 }
 
@@ -251,9 +253,9 @@ run_in_pty "647261667407"
 unset TMUX_REMOTE_CONTROL_TEST_EDITOR_INITIAL
 
 # Ctrl-C clears the current draft in both legacy and CSI-u terminal modes.
-run_in_pty "6469736361726403" "6b6570740d"
+run_in_pty "64697363617264036b6570740d"
 [[ "$(cat "$root/input")" == "kept" ]]
-run_in_pty "646973636172641b5b39393b3575" "616c736f206b6570740d"
+run_in_pty "646973636172641b5b39393b3575616c736f206b6570740d"
 [[ "$(cat "$root/input")" == "also kept" ]]
 
 # Ctrl-D exits without submitting a nonempty draft in both input modes.
@@ -263,18 +265,22 @@ run_in_pty "647261667404"
 run_in_pty "64726166741b5b3130303b3575"
 [[ "$(cat "$root/input")" == "not submitted" ]]
 
-# Extended keyboard reporting preserves standard Readline Ctrl and Alt editing.
+# The Pi TUI input component handles standard terminal word editing.
 run_in_pty "776f726c641b5b39373b357568656c6c6f200d"
 [[ "$(cat "$root/input")" == "hello world" ]]
-run_in_pty "68656c6c6f20776f726c641b5b39383b3375626967200d"
+run_in_pty "68656c6c6f20776f726c641b5b313b3344626967200d"
 [[ "$(cat "$root/input")" == "hello big world" ]]
+run_in_pty "6f6e652074776f207468726565011b5b313b33431b5b35373432363b33750d"
+[[ "$(cat "$root/input")" == "one three" ]]
+run_in_pty "6f6e65207468726565011b5b313b334320666173740d"
+[[ "$(cat "$root/input")" == "one fast three" ]]
 
 # Navigation and zoom shortcuts run remote tmux commands without submitting the
 # draft. CSI-u keeps Ctrl-J and Ctrl-number distinct from Enter and other keys.
 : >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
 while IFS= read -r navigation_key; do
   printf 'navigation did not return to the prompt' >"$root/input"
-  run_in_pty "6b6565702074686973206472616674${navigation_key}0d"
+  run_in_pty "6b6565702074686973206472616674${navigation_key}" "0d"
   [[ "$(cat "$root/input")" == "keep this draft" ]]
 done < <(python3 - <<'PY'
 for key in "fhjklpn0123456789":
