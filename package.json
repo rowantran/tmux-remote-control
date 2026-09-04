@@ -3,6 +3,13 @@
   "version": "0.1.0",
   "description": "Compose input locally and send it to the focused pane of a remote tmux session",
   "license": "MIT",
+  "files": [
+    "bin/",
+    "lib/",
+    "pi-extension.ts",
+    "install-pi-extension.sh",
+    "test/"
+  ],
   "bin": {
     "tmux-remote-control": "./bin/tmux-remote-control"
   },
@@ -29,9 +36,13 @@
     }
   },
   "scripts": {
-    "check": "bash -n bin/tmux-remote-control install-pi-extension.sh && node --check bin/tmux-remote-control-prompt.mjs",
+    "check": "bash -n bin/tmux-remote-control install-pi-extension.sh && node --check bin/tmux-remote-control-prompt.mjs && node --check bin/tmux-remote-control-pi.cjs && node --check lib/pi-remote.cjs",
     "install:pi": "./install-pi-extension.sh",
-    "test": "bash test/tmux-remote-control.test.sh",
+    "test": "node --test test/*.test.cjs && bash test/tmux-remote-control.test.sh",
+    "test:pi": "PI_TUI_TEST=1 node --test test/pi-tui.test.cjs",
     "verify": "npm run check && npm test"
+  },
+  "devDependencies": {
+    "jiti": "^2.7.0"
   }
 }
