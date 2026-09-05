@@ -31,7 +31,7 @@
   "scripts": {
     "check": "bash -n bin/tmux-remote-control install-pi-extension.sh && node --check bin/tmux-remote-control-prompt.mjs",
     "install:pi": "./install-pi-extension.sh",
-    "test": "bash test/tmux-remote-control.test.sh",
+    "test": "node --test test/pi-placeholder.test.mjs && bash test/tmux-remote-control.test.sh",
     "verify": "npm run check && npm test"
   }
 }

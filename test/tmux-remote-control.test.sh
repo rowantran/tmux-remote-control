@@ -79,9 +79,14 @@ old_target="$root/old-extension-target"
 mkdir -p "$install_dir"
 printf 'old target\n' >"$old_target"
 ln -s "$old_target" "$install_dir/tmux-remote-control.ts"
+mkdir -p "$install_dir/tmux-remote-control/lib"
+printf 'obsolete RPC extension\n' >"$install_dir/tmux-remote-control/index.ts"
+printf 'leave other files alone\n' >"$install_dir/tmux-remote-control/lib/keep.txt"
 HOME="$install_home" "$installer" >"$root/installer-output"
 [[ -f "$install_dir/tmux-remote-control.ts" ]]
 [[ ! -L "$install_dir/tmux-remote-control.ts" ]]
+[[ ! -e "$install_dir/tmux-remote-control/index.ts" ]]
+[[ -f "$install_dir/tmux-remote-control/lib/keep.txt" ]]
 cmp "$project_root/pi-extension.ts" "$install_dir/tmux-remote-control.ts"
 [[ "$(cat "$old_target")" == "old target" ]]
 grep -F "Installed Pi extension at $install_dir/tmux-remote-control.ts" "$root/installer-output" >/dev/null
@@ -405,10 +410,11 @@ SH
   chmod +x "$root/bin/ssh" "$root/bin/editor"
 
   test_tmux_socket="tmux-remote-control-test-$$"
+  # These fixture commands use POSIX syntax, regardless of the account's shell.
   tmux -L "$test_tmux_socket" -f /dev/null new-session -d -s "test session" -n first \
-    "IFS= read -r line; printf '%s' \"\$line\" >'$root/pane-first'"
+    /bin/sh -c "IFS= read -r line; printf '%s' \"\$line\" >'$root/pane-first'"
   tmux -L "$test_tmux_socket" new-window -d -t "test session:" -n second \
-    "IFS= read -r line; printf '%s' \"\$line\" >'$root/pane-second'"
+    /bin/sh -c "IFS= read -r line; printf '%s' \"\$line\" >'$root/pane-second'"
   launcher_pane="$(tmux -L "$test_tmux_socket" display-message -p -t 'test session:first' '#{pane_id}')"
   destination="$(tmux -L "$test_tmux_socket" display-message -p -t 'test session:second' '#{pane_id}')"
   socket_path="$(tmux -L "$test_tmux_socket" display-message -p -t 'test session' '#{socket_path}')"

@@ -1,5 +1,5 @@
 import { CustomEditor, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { sliceByColumn, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 const SHORTCUT = "ctrl+shift+r";
 type CustomEditorArguments = ConstructorParameters<typeof CustomEditor>;
@@ -15,7 +15,18 @@ class RemoteControlEditor extends CustomEditor {
 	}
 
 	render(width: number): string[] {
-		return [truncateToWidth(this.statusText(), width)];
+		const lines = super.render(width);
+		if (this.getText() !== "" || lines.length < 3) return lines;
+
+		// Decorate only the empty input row. Keep the normal borders, padding,
+		// and cursor; never put the placeholder into the editable/submitted text.
+		const padding = Math.min(this.getPaddingX(), Math.max(0, Math.floor((width - 1) / 2)));
+		const available = width - padding * 2 - 1;
+		if (available <= 0) return lines;
+		const placeholder = truncateToWidth(this.statusText(), available, "");
+		const cursor = sliceByColumn(lines[1], 0, padding + 1);
+		lines[1] = cursor + "\x1b[0m" + placeholder + " ".repeat(width - padding - 1 - visibleWidth(placeholder));
+		return lines;
 	}
 }
 
@@ -64,7 +75,7 @@ export default function tmuxRemoteControl(pi: ExtensionAPI): void {
 					tui,
 					theme,
 					keybindings,
-					() => `📡  ${ctx.ui.theme.fg("dim", "remote control mode: enabled")}`,
+					() => ctx.ui.theme.fg("dim", "📡 remote control active"),
 				),
 		);
 		active = true;
