@@ -1,5 +1,5 @@
 import { CustomEditor, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { sliceByColumn, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 const SHORTCUT = "ctrl+shift+r";
 type CustomEditorArguments = ConstructorParameters<typeof CustomEditor>;
@@ -9,24 +9,41 @@ class RemoteControlEditor extends CustomEditor {
 		tui: CustomEditorArguments[0],
 		theme: CustomEditorArguments[1],
 		keybindings: CustomEditorArguments[2],
-		private readonly statusText: () => string,
+		private readonly colorBorder: (hasText: boolean, text: string) => string,
 	) {
 		super(tui, theme, keybindings);
 	}
 
 	render(width: number): string[] {
-		const lines = super.render(width);
-		if (this.getText() !== "" || lines.length < 3) return lines;
+		if (width <= 0) return [""];
+		const hasText = this.getText() !== "";
+		const color = (text: string) => this.colorBorder(hasText, text);
 
-		// Decorate only the empty input row. Keep the normal borders, padding,
-		// and cursor; never put the placeholder into the editable/submitted text.
-		const padding = Math.min(this.getPaddingX(), Math.max(0, Math.floor((width - 1) / 2)));
-		const available = width - padding * 2 - 1;
-		if (available <= 0) return lines;
-		const placeholder = truncateToWidth(this.statusText(), available, "");
-		const cursor = sliceByColumn(lines[1], 0, padding + 1);
-		lines[1] = cursor + "\x1b[0m" + placeholder + " ".repeat(width - padding - 1 - visibleWidth(placeholder));
-		return lines;
+		// Let Pi handle text layout, cursor, scroll indicators, and autocomplete.
+		// Color its borders during this render only; Pi may update borderColor
+		// when the thinking level or bash mode changes.
+		const previousBorderColor = this.borderColor;
+		let lines: string[];
+		try {
+			this.borderColor = color;
+			lines = super.render(width);
+		} finally {
+			this.borderColor = previousBorderColor;
+		}
+
+		const prefix = truncateToWidth(hasText ? "📡 ── text entered " : "📡 ", width, "");
+		const remaining = width - visibleWidth(prefix);
+		// Keep the start of Pi's top border so its scroll-up count stays visible.
+		const rule = truncateToWidth(lines[0], remaining, "");
+		// Anchor IME/hardware cursor positioning to the collapsed row, without
+		// drawing a fake text cursor. Expanded text keeps Pi's original cursor.
+		const marker = !hasText && this.focused ? CURSOR_MARKER : "";
+		lines[0] = remaining > 0 ? color(prefix) + marker + rule : marker + color(prefix);
+
+		// An empty editor has a top border, one input row, and a bottom border.
+		// Remove the latter two, but keep any autocomplete rows below them.
+		// All decoration is display-only, never editable or submitted text.
+		return hasText ? lines : [lines[0], ...lines.slice(3)];
 	}
 }
 
@@ -75,7 +92,7 @@ export default function tmuxRemoteControl(pi: ExtensionAPI): void {
 					tui,
 					theme,
 					keybindings,
-					() => ctx.ui.theme.fg("dim", "📡 remote control active"),
+					(hasText, text) => ctx.ui.theme.fg(hasText ? "warning" : "accent", text),
 				),
 		);
 		active = true;

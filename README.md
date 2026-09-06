@@ -91,14 +91,31 @@ Run the installer again after updating this repository. It replaces the installe
 Run `/reload` in an existing Pi process, or start a new one. Inside a remote tmux session, press `Ctrl+Shift+R`. The extension:
 
 1. Builds the local `tmux-remote-control attach ...` command from `TMUX_PANE` and copies it with OSC 52, without opening the tmux server socket.
-2. Keeps the text box visible, with a dim `📡 remote control active` placeholder while it is empty.
-3. Hides the placeholder as soon as text is entered, and shows it again when the editor is cleared or a message is submitted. The placeholder is display-only; it is never included in submitted text.
+2. Collapses the empty editor to a single `📡 ─────` line in the theme's accent color (cyan/teal in the default dark theme).
+3. Expands the editor as soon as any text is entered, including spaces or newlines. The borders use the theme's warning color (amber/yellow), and the top border says `text entered` to make accidental input noticeable.
+4. Collapses back to one line when the editor is cleared or a message is submitted. The indicator is display-only; it is never included in submitted text.
+
+Empty:
+
+```text
+📡 ───────────────────────────────────────────
+```
+
+Text entered:
+
+```text
+📡 ── text entered ────────────────────────────
+oops, I typed into the remote session
+──────────────────────────────────────────────
+```
+
+Multiline input keeps Pi's normal wrapping, scrolling, and cursor. Autocomplete suggestions still appear below the editor when open.
 
 Both direct typing and tmux paste-and-Enter submissions continue to use Pi's normal input path. Any text entered directly in the remote pane stays visible.
 
 Paste the copied command into a local terminal. Press `Ctrl+Shift+R` again, or run `/remote-control`, to restore Pi's normal editor. The local controller stays open and works after either mode change. Because the extension does not open the tmux socket, it also works when Pi runs in a sandbox that forwards `TMUX_PANE` but blocks local Unix sockets, such as `isara pi run`.
 
-Pi selectors and dialogs, such as `/tree` and extension questionnaires, temporarily take keyboard focus instead of the editor. Do not submit a local controller message while one is open. Interact with it in the remote tmux pane. When it closes, focus returns to the editor. You can then continue from the same local controller or press `Ctrl+Shift+R` to remove the remote-control placeholder.
+Pi selectors and dialogs, such as `/tree` and extension questionnaires, temporarily take keyboard focus instead of the editor. Do not submit a local controller message while one is open. Interact with it in the remote tmux pane. When it closes, focus returns to the editor. You can then continue from the same local controller or press `Ctrl+Shift+R` to restore the normal editor.
 
 ## Clipboard setup
 
