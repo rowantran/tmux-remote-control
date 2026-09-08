@@ -161,7 +161,8 @@ root = Path(os.environ['HISTORY_TEST_ROOT'])
 file = Path(sys.argv[1])
 (root / 'editor-initial').write_bytes(file.read_bytes())
 (root / 'editor-rows').write_text(str(os.get_terminal_size(0).lines))
-file.write_bytes(b'edited first\nedited second\n')
+result = root / 'editor-result'
+file.write_bytes(result.read_bytes() if result.exists() else b'edited first\nedited second\n')
 ''')
         self.controllers = []
 
@@ -187,6 +188,11 @@ file.write_bytes(b'edited first\nedited second\n')
 
     def records(self):
         return [json.loads(file.read_text()) for file in self.history.glob("*.json")]
+
+    def draft(self):
+        files = list(self.root.glob("tmux-remote-control.??????"))
+        self.assertEqual(len(files), 1)
+        return files[0].read_bytes()
 
     def seed(self, text, host="example-host", session="work", timestamp="2026-06-01T12:00:00.000Z"):
         entry = dict(id=str(uuid.uuid4()), text=text, host=host, session=session, timestamp=timestamp, status="sent")
@@ -225,6 +231,9 @@ else:
         controller.wait_prompt(2)
         self.assertEqual((self.root / "editor-rows").read_text(), "40")
         self.assertEqual(os.get_terminal_size(controller.fd).lines, 8)
+        self.assertEqual(self.sent(), [])
+        self.assertEqual(len(self.records()), 1)  # Only the seeded message.
+        controller.send("\x03")  # Saving in the editor leaves a nonempty draft.
         controller.open_history()
         self.assertEqual(os.get_terminal_size(controller.fd).lines, 40)
         controller.send("\x1b")
@@ -235,15 +244,20 @@ else:
         controller.exit()
         self.assertEqual(self.sizes(), ["compact", "expanded", "compact", "expanded", "compact"])
 
-    def test_ghostty_editor_first_expands_and_compacts_on_exit(self):
+    def test_ghostty_editor_first_compacts_and_waits_for_confirmation(self):
         self.mock_ghostty()
-        controller = Controller(self.env, "--editor", "--once", wait_for_prompt=False)
-        self.controllers.append(controller)
-        controller.wait(lambda: controller.status is not None, "editor-only exit")
-        self.assertEqual(controller.status, 0)
+        controller = self.start("--editor", "--once")
         self.assertEqual((self.root / "editor-rows").read_text(), "40")
+        self.assertEqual(os.get_terminal_size(controller.fd).lines, 8)
         self.assertEqual(self.sizes(), ["expanded", "compact"])
+        self.assertEqual(self.sent(), [])
+        self.assertEqual(self.records(), [])
+        self.assertIsNone(controller.status)
+        controller.send("\r")
+        controller.wait(lambda: controller.status is not None, "confirmed editor draft exit")
+        self.assertEqual(controller.status, 0)
         self.assertEqual(self.sent()[0]["text"], "edited first\nedited second")
+        self.assertEqual(len(self.records()), 1)
 
     def test_ghostty_failed_editor_compacts_before_exit(self):
         self.mock_ghostty()
@@ -375,8 +389,148 @@ else:
         controller.send("\x1b[A\x07")
         controller.wait_prompt(3)
         self.assertEqual((self.root / "editor-initial").read_bytes(), text.encode())
+        self.assertEqual([entry["text"] for entry in self.sent()], [text])
+        self.assertFalse(any(record["text"] == "edited first\nedited second" for record in self.records()))
+        controller.send("\r")
+        controller.wait_prompt(4)
         self.assertEqual(self.sent()[-1]["text"], "edited first\nedited second")
         self.assertTrue(any(record["text"] == "edited first\nedited second" for record in self.records()))
+        controller.exit()
+
+    def test_editor_draft_shows_overflow_and_can_be_edited_after_switching_panes(self):
+        self.mock_ghostty()
+        text = "\n".join(f"edited line {index}" for index in range(1, 11))
+        (self.root / "editor-result").write_text(text + "\n")
+        controller = self.start()
+        start = len(controller.output)
+        controller.send("draft\x07")
+        controller.wait_prompt(2)
+        self.assertIn("↑ 5 more", controller.plain(start))
+        self.assertIn("edited line 10", controller.plain(start))
+        self.assertEqual(os.get_terminal_size(controller.fd).lines, 8)
+        self.assertEqual((self.root / "editor-initial").read_text(), "draft")
+        self.assertEqual(self.draft(), text.encode())
+        self.assertEqual(self.sent(), [])
+        self.assertEqual(self.records(), [])
+        start = len(controller.output)
+        controller.send("\x1b[A" * 9)
+        controller.wait(lambda: "↓ 5 more" in controller.plain(start), "hidden rows below editor draft")
+        controller.send("\x1b[107;5u")  # Ctrl-K: keep the editor draft, change the target.
+        controller.wait_prompt(3)
+        self.assertEqual(self.sent(), [])
+        controller.send("!\x1b[13;2u\r")  # Append text and an intentional final newline.
+        controller.wait_prompt(4)
+        self.assertEqual(self.sent(), [{"text": text + "!\n", "target": "B"}])
+        self.assertEqual(self.records()[0]["text"], text + "!\n")
+        controller.exit()
+
+    def test_editor_draft_can_be_reopened_and_cleared_before_submission(self):
+        controller = self.start("--once")
+        controller.send("draft\x07")
+        controller.wait_prompt(2)
+        controller.send("\x07")
+        controller.wait_prompt(3)
+        self.assertEqual((self.root / "editor-initial").read_text(), "edited first\nedited second")
+        self.assertEqual(self.sent(), [])
+        self.assertEqual(self.records(), [])
+        controller.send("\x03\x07")
+        controller.wait_prompt(4)
+        self.assertEqual((self.root / "editor-initial").read_text(), "")
+        controller.send("\x03replacement\r")
+        controller.wait(lambda: controller.status is not None, "replacement submission")
+        self.assertEqual(controller.status, 0)
+        self.assertEqual(self.sent(), [{"text": "replacement", "target": "A"}])
+        self.assertEqual(len(self.records()), 1)
+
+    def test_editor_draft_can_be_discarded_without_sending(self):
+        for options in [(), ("--editor", "--once")]:
+            controller = self.start(*options)
+            if not options:
+                controller.send("\x07")
+                controller.wait_prompt(2)
+            controller.exit()
+            self.assertEqual(self.sent(), [])
+            self.assertEqual(self.records(), [])
+
+    def test_empty_editor_result_returns_to_an_editable_prompt(self):
+        (self.root / "editor-result").write_text("\n")
+        controller = self.start("--editor", "--once")
+        self.assertEqual(self.sent(), [])
+        self.assertEqual(self.records(), [])
+        self.assertEqual(self.draft(), b"")
+        controller.send("\r")  # Empty Enter is not a submission, even with --once.
+        controller.wait_prompt(2)
+        self.assertEqual(self.sent(), [])
+        self.assertEqual(self.records(), [])
+        controller.send("typed after editor\r")
+        controller.wait(lambda: controller.status is not None, "submission after empty editor")
+        self.assertEqual(controller.status, 0)
+        self.assertEqual(self.sent()[0]["text"], "typed after editor")
+
+    def test_editor_first_reopens_only_after_an_explicit_submission(self):
+        controller = self.start("--editor")
+        self.assertEqual(self.sent(), [])
+        controller.send("\r")
+        controller.wait_prompt(2)
+        self.assertEqual((self.root / "editor-initial").read_text(), "")
+        self.assertEqual(len(self.sent()), 1)
+        self.assertEqual(len(self.records()), 1)
+        controller.exit()
+        self.assertEqual(len(self.sent()), 1)
+
+    def test_editor_draft_preserves_whitespace_until_inline_editing(self):
+        text = "  first\tline\r\nsecond\r\n"
+        (self.root / "editor-result").write_bytes((text + "\r\n").encode())
+        controller = self.start("--editor")
+        self.assertEqual(self.draft(), text.encode())  # CRLF already removed, exactly once.
+        self.assertEqual(self.sent(), [])
+        self.assertEqual(self.records(), [])
+        controller.send("\x1b[D\x1b[C\x1b[107;5u")  # Cursor motion does not edit the payload.
+        controller.wait_prompt(2)
+        self.assertEqual(self.draft(), text.encode())
+        controller.send("\r")
+        controller.wait_prompt(3)
+        self.assertEqual(self.sent(), [{"text": text, "target": "B"}])
+        self.assertEqual(self.records()[0]["text"], text)
+        controller.exit()
+
+    def test_external_edits_to_recalled_messages_preserve_history_and_original_draft(self):
+        self.seed("oldest", timestamp="2026-06-01T10:00:00.000Z")
+        self.seed("newest")
+        edited = b" edited\tnewest"
+        (self.root / "editor-result").write_bytes(edited + b"\r\n")
+        controller = self.start()
+        controller.send("original draft\x1b[A\x07")
+        controller.wait_prompt(2)
+        self.assertEqual((self.root / "editor-initial").read_bytes(), b"newest")
+        self.assertEqual(self.draft(), edited)
+        controller.send("\x1b[A\x1b[107;5u")  # Browse position survives editor return.
+        controller.wait_prompt(3)
+        self.assertEqual(self.draft(), b"oldest")
+        controller.send("\x1b[B\x1b[112;5u")
+        controller.wait_prompt(4)
+        self.assertEqual(self.draft(), edited)
+        controller.send("\x1b[B\x1b[107;5u")
+        controller.wait_prompt(5)
+        self.assertEqual(self.draft(), b"original draft")
+        self.assertEqual(self.sent(), [])
+        self.assertEqual(sorted(record["text"] for record in self.records()), ["newest", "oldest"])
+        controller.send("\x1b[A\r")
+        controller.wait_prompt(6)
+        self.assertEqual(self.sent()[0]["text"], edited.decode())
+        controller.exit()
+
+    def test_history_recall_after_editor_return_is_not_trimmed_at_send(self):
+        text = "history\ttext\r\nlast\n\n"
+        self.seed(text)
+        controller = self.start()
+        controller.send("\x07")
+        controller.wait_prompt(2)
+        self.assertEqual(self.sent(), [])
+        controller.send("\x03\x1b[A\r")
+        controller.wait_prompt(3)
+        self.assertEqual(self.sent()[0]["text"], text)
+        self.assertTrue(all(record["text"] == text for record in self.records()))
         controller.exit()
 
     def test_failed_send_is_saved_unconfirmed_and_not_retried(self):

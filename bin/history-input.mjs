@@ -103,11 +103,12 @@ export class HistoryInput {
       "─".repeat(Math.max(0, width)),
     ];
     const lines = this.editor.render(width - 2);
-    const border = "─".repeat(width);
+    // Extend Pi's borders across the prompt prefix without hiding its counts
+    // of wrapped rows above and below the visible text.
     return [
-      border,
+      `──${lines[0]}`,
       ...lines.slice(1, -1).map((text, index) => `${index === 0 ? "› " : "  "}${text}`),
-      border,
+      `──${lines.at(-1)}`,
     ];
   }
 

@@ -189,6 +189,8 @@ Attach mode clears the current terminal screen and docks the remote target and i
 ─────────────────────────────
 ```
 
+When text extends beyond the visible rows, the borders preserve Pi's `↑ N more` and `↓ N more` labels for hidden rows above and below. Counts include wrapped rows and update as you move the cursor or resize the terminal.
+
 Controls:
 
 - `Enter`: submit the current message
@@ -202,7 +204,7 @@ Controls:
 - `Ctrl-U`: delete to the start of the line
 - `Ctrl-Y` / `Alt-Y`: paste or cycle through deleted text
 - `Ctrl--`: undo
-- `Ctrl-G`: open the current draft in an external editor, then submit when the editor exits
+- `Ctrl-G`: open the current draft in an external editor, then return the saved text to the input box without submitting
 - `Ctrl-F`: toggle zoom for the focused pane
 - `Ctrl-H`: select the pane below
 - `Ctrl-J`: select the pane to the left
@@ -217,7 +219,9 @@ The controller shortcuts take precedence when they overlap a standard editing ke
 
 The Pi TUI library negotiates the terminal keyboard protocol and normalizes legacy and extended key sequences. Distinct sequences are necessary because traditional terminal input cannot tell some `Ctrl-number` keys apart from other control keys. Unsupported terminals can still use the pane shortcuts except `Ctrl-J`, plus `Ctrl-P` and `Ctrl-N`.
 
-Pressing Enter on an empty prompt shows another prompt. Use `--editor` to open the external editor immediately. Add `--once` with `--editor` if the editor should open only once.
+Pressing Enter on an empty prompt shows another prompt. After saving and exiting the external editor, review or edit the draft in the input box, then press Enter to send it. Exiting the editor does not send or record a message in history. The controller removes exactly one final LF or CRLF when the editor returns, not when sending. Other whitespace and newlines stay intact until you edit the draft inline; intentional newlines you add afterward are preserved.
+
+Use `--editor` to start each message in the external editor. It also returns to the input box for confirmation. Add `--once` to exit after one explicitly submitted message, or press `Ctrl-D` to exit without sending.
 
 The editor is selected from the first configured value:
 
@@ -262,7 +266,7 @@ History restores message text into the local prompt. **It never sends a message 
 
 Press `Up` at an empty prompt to restore the latest message. Keep pressing `Up` to browse older messages; `Down` moves toward newer ones, then restores your original draft. For multiline text, arrows move within the message before browsing past its first or last text line.
 
-The prompt keeps plain borders during recall. Timestamps and send status appear only in the history picker:
+The prompt borders show only scroll counts when needed during recall. Timestamps and send status appear only in the history picker:
 
 ```text
 📡  Controlling: devbox → work
@@ -271,7 +275,7 @@ The prompt keeps plain borders during recall. Timestamps and send status appear 
 ─────────────────────────────────────────────
 ```
 
-Arrow history covers the current SSH host and tmux session, across all panes and windows. Editing a recalled entry does not change the saved message. Your original draft and edits to recalled messages survive pane/window shortcuts. `Ctrl-C` clears the draft and leaves history browsing.
+Arrow history covers the current SSH host and tmux session, across all panes and windows. Editing a recalled entry does not change the saved message. Your original draft, history browse position, and edits to recalled messages survive external-editor returns and pane/window shortcuts. `Ctrl-C` clears the draft and leaves history browsing.
 
 ### Searchable history
 
@@ -287,7 +291,7 @@ Press `Esc` once on an empty prompt to open history. Spaces and newlines count a
 
 The picker uses `fzf` when available and otherwise uses a built-in fuzzy selector. It ignores `FZF_DEFAULT_OPTS` and `FZF_DEFAULT_OPTS_FILE` so user settings cannot enable automatic acceptance or change the restore-only behavior. Controller navigation shortcuts do not send remote commands while the picker is open.
 
-Multiline messages retain their full text. Recalling a message and sending it unchanged preserves its whitespace, including tabs and trailing newlines. Once you edit it inline, Pi's usual tab expansion and line-ending normalization apply. `Ctrl-G` opens the original recalled text in the external editor and keeps its existing submit-on-exit behavior.
+Multiline messages retain their full text. Recalling a message and sending it unchanged preserves its whitespace, including tabs and trailing newlines. Once you edit it inline, Pi's usual tab expansion and line-ending normalization apply. `Ctrl-G` opens the original recalled text in the external editor and returns the saved draft to the input box without submitting it.
 
 ### Local storage
 
@@ -299,7 +303,7 @@ ${XDG_STATE_HOME:-~/.local/state}/tmux-remote-control/history/
 
 The controller keeps the latest 1,000 submissions in private JSON files (directory permissions `0700`, file permissions `0600`). Each entry contains message text, a timestamp, host/session names for filtering, and send status. **No original pane ID or pane location is saved.** History is local plaintext, not encrypted, and can contain sensitive message text. Remove this directory to clear saved history, or set `TMUX_REMOTE_CONTROL_HISTORY=0` to disable recording and recall.
 
-Both inline and external-editor submissions are saved before the SSH send. Failed or interrupted sends remain marked `send unconfirmed`; they are never retried automatically. An unconfirmed message may already have reached the remote application. Check there before resending. History cannot undo an earlier submission.
+Messages composed inline or in the external editor are saved to history only after you press Enter at the input box, before the SSH send. Failed or interrupted sends remain marked `send unconfirmed`; they are never retried automatically. An unconfirmed message may already have reached the remote application. Check there before resending. History cannot undo an earlier submission.
 
 History uses the SSH alias and tmux session name as its scope. If either name changes, use the picker's all-history scope to find older messages. Fixed-pane controllers use the containing session's history too; recall does not change their pinned target.
 

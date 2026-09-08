@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, visibleWidth } from "@earendil-works/pi-tui";
 import { HistoryInput, isHistoryShortcut } from "../bin/history-input.mjs";
 
 const entries = [
@@ -106,6 +106,81 @@ test("history rendering fits narrow terminals and escapes control bytes", () => 
   assert.equal(editor.getValue(), "\x1b]52;c;bad\x07\n界🙂");
 });
 
+test("scroll borders count hidden rows above and below without changing the draft", () => {
+  const text = Array.from({ length: 12 }, (_, index) => `line ${index + 1}`).join("\n");
+  const editor = input(text, []);
+  const assertBorders = (above, below) => {
+    const lines = editor.render(80);
+    for (const [border, count, arrow] of [[lines[0], above, "↑"], [lines.at(-1), below, "↓"]]) {
+      if (count) assert.ok(border.includes(`${arrow} ${count} more`), border);
+      else assert.equal(border, "─".repeat(80));
+    }
+    assert.equal(lines.length, 9); // Seven visible text rows and two borders.
+    assert.ok(lines.every((line) => visibleWidth(line) === 80));
+    assert.equal(lines.join("").split(CURSOR_MARKER).length - 1, 1);
+    assert.equal(editor.getValue(), text);
+  };
+  assertBorders(5, 0);
+  for (let index = 0; index < 7; index++) {
+    editor.handleInput(up);
+    editor.render(80);
+  }
+  assertBorders(4, 1);
+  for (let index = 0; index < 4; index++) {
+    editor.handleInput(up);
+    editor.render(80);
+  }
+  assertBorders(0, 5);
+  let submitted;
+  editor.onSubmit = () => { submitted = editor.getValue(); };
+  editor.handleInput("\r");
+  assert.equal(submitted, text, "scroll labels are never submitted");
+  editor.clear();
+  assert.equal(editor.render(80)[0], "─".repeat(80));
+  assert.equal(editor.render(80).at(-1), "─".repeat(80));
+});
+
+test("scroll counts include wrapped rows and update after width and height changes", () => {
+  const terminal = { rows: 8 };
+  const editor = new HistoryInput({ terminal, requestRender() {} }, [], "x".repeat(119));
+  editor.focused = true;
+  let lines = editor.render(23); // 20 text columns: six wrapped rows, five visible.
+  assert.ok(lines[0].includes("↑ 1 more"));
+  assert.equal(lines.length, 7);
+  assert.equal(editor.editor.getLines().length, 1, "the draft has only one logical line");
+  lines = editor.render(43);
+  assert.equal(lines[0], "─".repeat(43));
+  assert.equal(lines.at(-1), "─".repeat(43));
+  assert.equal(lines.length, 5);
+  assert.ok(editor.render(23)[0].includes("↑ 1 more"));
+  terminal.rows = 40;
+  lines = editor.render(23);
+  assert.equal(lines[0], "─".repeat(23));
+  assert.equal(lines.length, 8);
+  terminal.rows = 8;
+  assert.ok(editor.render(23)[0].includes("↑ 1 more"));
+  assert.equal(editor.getValue(), "x".repeat(119));
+});
+
+test("recalled overflow keeps Pi's borders, text, and cursor within narrow widths", () => {
+  const text = "界🙂\n".repeat(30);
+  const editor = input("", [{ ...entries[0], text }]);
+  editor.handleInput(up);
+  for (const width of [0, 1, 2, 3, 4, 5, 6, 10, 15, 24, 80]) {
+    const lines = editor.render(width);
+    assert.ok(lines.every((line) => visibleWidth(line) <= width), `width ${width}`);
+    if (width >= 5) {
+      const normal = editor.editor.render(width - 2);
+      assert.equal(lines[0], `──${normal[0]}`);
+      assert.equal(lines.at(-1), `──${normal.at(-1)}`);
+      assert.deepEqual(lines.slice(1, -1), normal.slice(1, -1).map((line, index) =>
+        `${index === 0 ? "› " : "  "}${line}`));
+      assert.equal(lines.join("").split(CURSOR_MARKER).length - 1, 1);
+    }
+  }
+  assert.equal(editor.getValue(), text);
+});
+
 test("single Esc opens history only on an empty prompt in legacy and extended modes", () => {
   for (const escape of ["\x1b", "\x1b[27u"]) {
     assert.equal(isHistoryShortcut(escape, ""), true);
@@ -118,7 +193,7 @@ test("single Esc opens history only on an empty prompt in legacy and extended mo
   }
 });
 
-test("prompt borders stay plain for empty, typed, and recalled messages", () => {
+test("prompt borders stay plain when empty, typed, and recalled messages fit", () => {
   const editor = input();
   const assertPlain = () => {
     for (const width of [0, 1, 3, 10, 80, 120]) {
