@@ -55,7 +55,7 @@ Local device:
 - Bash
 - OpenSSH
 - Node.js 22.19 or newer for the inline prompt and editor submission handling
-- `fzf` is optional and provides the session selector when several sessions exist
+- `fzf` is optional and provides fuzzy message-history search and the session selector when several sessions exist
 
 Remote machine:
 
@@ -180,7 +180,7 @@ tmux-remote-control attach devbox work --once
 
 ## Local input
 
-Attach mode clears the current terminal screen and docks the remote target and inline prompt at the bottom. The prompt uses Pi's `@earendil-works/pi-tui` input component, including its standard terminal editing behavior. Gruvbox colors distinguish the host and session; the borders and prompt arrow use the terminal's default foreground color:
+Attach mode clears the current terminal screen and docks the remote target and inline prompt at the bottom. The prompt uses Pi's `@earendil-works/pi-tui` editor component, including multiline editing, wrapping, and scrolling. Gruvbox colors distinguish the host and session; the borders and prompt arrow use the terminal's default foreground color:
 
 ```text
 📡  Controlling: devbox → work
@@ -191,7 +191,10 @@ Attach mode clears the current terminal screen and docks the remote target and i
 
 Controls:
 
-- `Enter`: submit the current line
+- `Enter`: submit the current message
+- `Shift-Enter`: insert a newline
+- `Up` / `Down`: recall older/newer messages at the first/last text line; moving past the newest entry restores the original draft
+- `Esc`: open searchable message history when the prompt is empty
 - `Alt-Left` / `Alt-Right` or `Ctrl-Left` / `Ctrl-Right`: move by one word
 - `Alt-Backspace` or `Ctrl-W`: delete the previous word
 - `Alt-Delete` or `Alt-D`: delete the next word
@@ -231,6 +234,55 @@ TMUX_REMOTE_CONTROL_EDITOR='code --wait' tmux-remote-control attach devbox work
 tmux-remote-control attach devbox work --editor --once
 ```
 
+## Message history
+
+History restores message text into the local prompt. **It never sends a message or changes the remote destination by itself.** After recall, you can edit the message, switch to the correct pane with the usual shortcuts, and press Enter to send it.
+
+### Quick recall
+
+Press `Up` at an empty prompt to restore the latest message. Keep pressing `Up` to browse older messages; `Down` moves toward newer ones, then restores your original draft. For multiline text, arrows move within the message before browsing past its first or last text line.
+
+The prompt keeps plain borders during recall. Timestamps and send status appear only in the history picker:
+
+```text
+📡  Controlling: devbox → work
+─────────────────────────────────────────────
+› review the authentication changes
+─────────────────────────────────────────────
+```
+
+Arrow history covers the current SSH host and tmux session, across all panes and windows. Editing a recalled entry does not change the saved message. Your original draft and edits to recalled messages survive pane/window shortcuts. `Ctrl-C` clears the draft and leaves history browsing.
+
+### Searchable history
+
+Press `Esc` once on an empty prompt to open history. Spaces and newlines count as text, so this shortcut cannot replace a nonempty draft. Inside the picker, `Esc` closes it.
+
+- Type to fuzzy-search message text, host/session names, and timestamps.
+- `Up` / `Down` selects a result.
+- `Enter` restores the selected message into the prompt, **without sending**.
+- `Esc` or `Ctrl-C` cancels.
+- `Tab` toggles between the current host/session and all local controller history, keeping the search query.
+- `Shift-Up` / `Shift-Down` scrolls the full message preview.
+- `PageUp` / `PageDown` pages through the results.
+
+The picker uses `fzf` when available and otherwise uses a built-in fuzzy selector. It ignores `FZF_DEFAULT_OPTS` and `FZF_DEFAULT_OPTS_FILE` so user settings cannot enable automatic acceptance or change the restore-only behavior. Controller navigation shortcuts do not send remote commands while the picker is open.
+
+Multiline messages retain their full text. Recalling a message and sending it unchanged preserves its whitespace, including tabs and trailing newlines. Once you edit it inline, Pi's usual tab expansion and line-ending normalization apply. `Ctrl-G` opens the original recalled text in the external editor and keeps its existing submit-on-exit behavior.
+
+### Local storage
+
+History persists across controller restarts in:
+
+```text
+${XDG_STATE_HOME:-~/.local/state}/tmux-remote-control/history/
+```
+
+The controller keeps the latest 1,000 submissions in private JSON files (directory permissions `0700`, file permissions `0600`). Each entry contains message text, a timestamp, host/session names for filtering, and send status. **No original pane ID or pane location is saved.** History is local plaintext, not encrypted, and can contain sensitive message text. Remove this directory to clear saved history, or set `TMUX_REMOTE_CONTROL_HISTORY=0` to disable recording and recall.
+
+Both inline and external-editor submissions are saved before the SSH send. Failed or interrupted sends remain marked `send unconfirmed`; they are never retried automatically. An unconfirmed message may already have reached the remote application. Check there before resending. History cannot undo an earlier submission.
+
+History uses the SSH alias and tmux session name as its scope. If either name changes, use the picker's all-history scope to find older messages. Fixed-pane controllers use the containing session's history too; recall does not change their pinned target.
+
 ## Environment
 
 - `TMUX_REMOTE_CONTROL_HOST`: default SSH host for either mode
@@ -238,6 +290,9 @@ tmux-remote-control attach devbox work --editor --once
 - `TMUX_REMOTE_CONTROL_TARGET`: default attach-mode fixed pane target
 - `TMUX_REMOTE_CONTROL_EDITOR`: attach-mode editor command
 - `TMUX_REMOTE_CONTROL_TMPDIR`: local directory for prompt and discovery temporary files
+- `TMUX_REMOTE_CONTROL_HISTORY`: set to `0` to disable message history (enabled by default)
+- `TMUX_REMOTE_CONTROL_HISTORY_DIR`: override the local history directory
+- `TMUX_REMOTE_CONTROL_HISTORY_PICKER`: `auto` (default), `fzf`, or `builtin`
 
 Command-line host, session, and target arguments override environment defaults.
 

@@ -2,15 +2,16 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import {
-  Input,
   Key,
   ProcessTerminal,
   TuiMainScreen,
   matchesKey,
   truncateToWidth,
 } from "@earendil-works/pi-tui";
+import { HistoryInput, isHistoryShortcut } from "./history-input.mjs";
+import { getHistoryDirectory, loadHistory } from "./history-store.mjs";
 
-const [draftPath, actionPath, controllerHost, controllerTarget] = process.argv.slice(2);
+const [draftPath, actionPath, controllerHost, controllerTarget, controllerSession, statePath] = process.argv.slice(2);
 if (!draftPath || !actionPath || !controllerHost || !controllerTarget) {
   process.stderr.write(
     "Usage: tmux-remote-control-prompt DRAFT_FILE ACTION_FILE CONTROLLER_HOST CONTROLLER_TARGET\n",
@@ -24,7 +25,23 @@ if (!process.stdin.isTTY || !process.stdout.isTTY) {
 
 const terminal = new ProcessTerminal();
 const tui = new TuiMainScreen(terminal);
-const input = new Input();
+let entries = [];
+try {
+  if (process.env.TMUX_REMOTE_CONTROL_HISTORY !== "0") entries = loadHistory(getHistoryDirectory());
+} catch (error) {
+  process.stderr.write(`tmux-remote-control: could not read history: ${error.message}\n`);
+}
+let state = {};
+if (statePath) {
+  const text = readFileSync(statePath, "utf8");
+  if (text) state = JSON.parse(text);
+}
+const input = new HistoryInput(
+  tui,
+  entries.filter((entry) => entry.host === controllerHost && entry.session === controllerSession),
+  readFileSync(draftPath, "utf8"),
+  state,
+);
 let finished = false;
 
 const colorsEnabled = !("NO_COLOR" in process.env);
@@ -46,13 +63,7 @@ class ControllerPrompt {
       hostColor(controllerHost) +
       muted(" → ") +
       targetColor(controllerTarget);
-    const border = "─".repeat(safeWidth);
-    const inputLine = this.input.render(width)[0] ?? "";
-    // Input uses a two-column `> ` prompt. Keep its width and replace only
-    // the glyph so editing, horizontal scrolling, and cursor placement stay
-    // under the control of pi-tui's Input component.
-    const decoratedInput = `› ${inputLine.slice(2)}`;
-    const content = [truncateToWidth(status, safeWidth), border, decoratedInput, border];
+    const content = [truncateToWidth(status, safeWidth), ...this.input.render(safeWidth)];
     const topPadding = Math.max(0, terminal.rows - content.length);
     return [...Array(topPadding).fill(""), ...content];
   }
@@ -66,6 +77,7 @@ function finish(action) {
   if (finished) return;
   finished = true;
   writeFileSync(draftPath, input.getValue());
+  if (statePath) writeFileSync(statePath, JSON.stringify(input.getState()));
   writeFileSync(actionPath, `${action}\n`);
   tui.stop();
 }
@@ -82,20 +94,20 @@ const actions = [
   ...Array.from({ length: 10 }, (_, index) => [Key.ctrl(String(index)), `window-${index}`]),
 ];
 
-input.setValue(readFileSync(draftPath, "utf8"));
-// Input.setValue preserves its cursor position. Use the component's own
-// line-end keybinding to place the cursor after a restored draft.
-input.handleInput("\x05");
 input.onSubmit = () => finish("submit");
 
 tui.addChild(new ControllerPrompt(input));
 tui.setFocus(input);
 tui.addInputListener((data) => {
-  // A legacy terminal sends the same newline byte for Enter and Ctrl-J. Let
-  // Input submit it; pane-left is available when Ctrl-J has a distinct code.
+  if (finished) return { consume: true };
+  if (isHistoryShortcut(data, input.getValue())) {
+    finish("history");
+    return { consume: true };
+  }
+  // A legacy terminal sends the same newline byte for Enter and Ctrl-J.
   if (data === "\n") return undefined;
   if (matchesKey(data, Key.ctrl("c"))) {
-    input.setValue("");
+    input.clear();
     tui.requestRender();
     return { consume: true };
   }

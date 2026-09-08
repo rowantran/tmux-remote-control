@@ -25,6 +25,9 @@ Environment:
   TMUX_REMOTE_CONTROL_SESSION   Default tmux session selector
   TMUX_REMOTE_CONTROL_TARGET    Default fixed tmux pane target
   TMUX_REMOTE_CONTROL_EDITOR    Editor command; falls back to VISUAL, EDITOR, then vi
+  TMUX_REMOTE_CONTROL_HISTORY   Set to 0 to disable message history
+  TMUX_REMOTE_CONTROL_HISTORY_DIR  Override the local history directory
+  TMUX_REMOTE_CONTROL_HISTORY_PICKER  auto (fzf if available), builtin, or fzf
 
 Remote launcher:
   HOST                SSH host or local SSH config alias; defaults to the short hostname
@@ -37,7 +40,10 @@ Attach options:
   --editor            Open the external editor immediately instead of the inline prompt
 
 At the inline prompt:
-  Enter               Submit the current line
+  Enter               Submit the current message
+  Up / Down           Recall older/newer messages; Down restores the draft
+  Esc                 Browse/search history when the prompt is empty
+  Shift-Enter         Insert a newline
   Alt-Left / Alt-Right Move backward/forward by one word
   Alt-Backspace        Delete the previous word
   Alt-Delete / Alt-D   Delete the next word
@@ -246,8 +252,9 @@ validate_tmux_target() {
 }
 
 prompt_helper=""
-if [[ "$action" == "compose" && "$editor_first" != "true" ]]; then
-  command -v node >/dev/null 2>&1 || die "Node.js is required for the inline prompt"
+history_helper=""
+if [[ "$action" == "compose" ]]; then
+  command -v node >/dev/null 2>&1 || die "Node.js is required for composing input"
   script_path="${BASH_SOURCE[0]}"
   while [[ -L "$script_path" ]]; do
     script_dir="$(cd -P "$(dirname "$script_path")" && pwd)"
@@ -260,7 +267,9 @@ if [[ "$action" == "compose" && "$editor_first" != "true" ]]; then
   done
   script_dir="$(cd -P "$(dirname "$script_path")" && pwd)"
   prompt_helper="$script_dir/tmux-remote-control-prompt.mjs"
+  history_helper="$script_dir/tmux-remote-control-history.mjs"
   [[ -f "$prompt_helper" ]] || die "could not find inline prompt helper: $prompt_helper"
+  [[ -f "$history_helper" ]] || die "could not find history helper: $history_helper"
 fi
 
 temp_root="${TMUX_REMOTE_CONTROL_TMPDIR:-${TMPDIR:-/tmp}}"
@@ -277,12 +286,14 @@ control_path="$control_dir/c"
 ssh_args=(-o ControlMaster=auto -o ControlPersist=10m -o "ControlPath=$control_path")
 prompt_file=""
 prompt_action_file=""
+prompt_state_file=""
 choices=""
 cleanup() {
   ssh -o "ControlPath=$control_path" -O exit "$host" >/dev/null 2>&1 || true
   rm -f "$session_file" "$query_file"
   [[ -z "$prompt_file" ]] || rm -f "$prompt_file"
   [[ -z "$prompt_action_file" ]] || rm -f "$prompt_action_file"
+  [[ -z "$prompt_state_file" ]] || rm -f "$prompt_state_file"
   [[ -z "$choices" ]] || rm -f "$choices"
   rm -rf "$control_dir"
 }
@@ -355,10 +366,10 @@ else
   validate_tmux_target "$target"
   quoted_target="$(shell_quote "$target")"
   ssh "${ssh_args[@]}" -T "$host" \
-    "tmux display-message -p -t $quoted_target '#{pane_id}|#{session_name}:#{window_index}.#{pane_index}'" \
+    "tmux display-message -p -t $quoted_target '#{pane_id}|#{session_name}:#{window_index}.#{pane_index}|#{session_name}'" \
     >"$query_file" || die "could not find tmux pane $target on $host"
-  IFS='|' read -r pane_id pane_location <"$query_file" || true
-  [[ "$pane_id" =~ ^%[0-9]+$ && -n "$pane_location" && "$pane_location" != *[[:cntrl:]]* ]] || \
+  IFS='|' read -r pane_id pane_location session_name <"$query_file" || true
+  [[ "$pane_id" =~ ^%[0-9]+$ && -n "$pane_location" && "$pane_location" != *[[:cntrl:]]* && -n "$session_name" && "$session_name" != *[[:cntrl:]]* ]] || \
     die "could not find tmux pane $target on $host"
 fi
 
@@ -412,9 +423,10 @@ while :; do
     /bin/sh -c "$editor \"\$1\"" sh "$prompt_file" || die "editor exited unsuccessfully"
   else
     prompt_action_file="$(mktemp "$temp_root/tmux-remote-control-action.XXXXXX")"
+    prompt_state_file="$(mktemp "$temp_root/tmux-remote-control-state.XXXXXX")"
     while :; do
       : >"$prompt_action_file"
-      node "$prompt_helper" "$prompt_file" "$prompt_action_file" "$host" "$controller_target" </dev/tty >/dev/tty || \
+      node "$prompt_helper" "$prompt_file" "$prompt_action_file" "$host" "$controller_target" "$session_name" "$prompt_state_file" </dev/tty >/dev/tty || \
         die "inline prompt exited unsuccessfully"
       printf '\r\033[2K' >/dev/tty
       IFS= read -r prompt_action <"$prompt_action_file" || \
@@ -428,6 +440,9 @@ while :; do
           trim_editor_newline="true"
           /bin/sh -c "$editor \"\$1\"" sh "$prompt_file" || die "editor exited unsuccessfully"
           break
+          ;;
+        history)
+          node "$history_helper" pick "$prompt_file" "$prompt_state_file" "$host" "$session_name" </dev/tty >/dev/tty || true
           ;;
         exit)
           exit 0
@@ -443,10 +458,14 @@ while :; do
           ;;
       esac
     done
-    rm -f "$prompt_action_file"
+    rm -f "$prompt_action_file" "$prompt_state_file"
     prompt_action_file=""
+    prompt_state_file=""
   fi
 
+  # Store exactly the bytes SSH will receive, including multiline input. Only
+  # the external editor's final newline is removed, once, before recording.
+  node "$history_helper" prepare "$prompt_file" "$trim_editor_newline" || die "could not prepare input"
   if [[ ! -s "$prompt_file" ]]; then
     if [[ "$loop" == "true" && "$editor_first" != "true" ]]; then
       rm -f "$prompt_file"
@@ -468,20 +487,15 @@ while :; do
   # shells never parse assignments, functions, traps, or command substitutions.
   remote_command="sh -c $(shell_quote "$remote_command")"
 
-  if [[ "$trim_editor_newline" == "true" ]]; then
-    node - "$prompt_file" <<'NODE' | ssh "${ssh_args[@]}" -T "$host" "$remote_command"
-const fs = require("node:fs");
-let content = fs.readFileSync(process.argv[2]);
-if (content.length > 0 && content[content.length - 1] === 0x0a) {
-  content = content.subarray(0, content.length - 1);
-  if (content.length > 0 && content[content.length - 1] === 0x0d) {
-    content = content.subarray(0, content.length - 1);
-  }
-}
-process.stdout.write(content);
-NODE
-  else
-    ssh "${ssh_args[@]}" -T "$host" "$remote_command" <"$prompt_file"
+  # Record before sending, so a lost connection or controller interruption
+  # cannot discard the message. A failed SSH command may have partly delivered
+  # it, so leave its status unconfirmed and never retry automatically.
+  history_id="$(node "$history_helper" record "$prompt_file" "$host" "$session_name" || true)"
+  if ! ssh "${ssh_args[@]}" -T "$host" "$remote_command" <"$prompt_file"; then
+    die "submission failed; delivery is unconfirmed (check the remote pane before resending)"
+  fi
+  if [[ -n "$history_id" ]]; then
+    node "$history_helper" mark "$history_id" || true
   fi
 
   rm -f "$prompt_file"
