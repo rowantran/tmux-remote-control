@@ -24,14 +24,15 @@ ANSI = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 class Controller:
-    def __init__(self, env, *options):
+    def __init__(self, env, *options, wait_for_prompt=True):
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             os.execve(str(SCRIPT), [str(SCRIPT), "attach", "example-host", "--session", "%7", *options], env)
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
         self.output = bytearray()
         self.status = None
-        self.wait_prompt(1)
+        if wait_for_prompt:
+            self.wait_prompt(1)
 
     def send(self, text):
         os.write(self.fd, text.encode() if isinstance(text, str) else text)
@@ -117,6 +118,7 @@ class HistoryTerminalTests(unittest.TestCase):
             "PATH": f"{self.bin}:{os.environ['PATH']}",
             "TERM": "xterm-256color",
             "NO_COLOR": "1",
+            "TMUX_REMOTE_CONTROL_GHOSTTY_RESIZE": "0",  # Never automate real Ghostty panes.
             "TMUX_REMOTE_CONTROL_HISTORY_DIR": str(self.history),
             "TMUX_REMOTE_CONTROL_HISTORY_PICKER": "builtin",
             "TMUX_REMOTE_CONTROL_HISTORY": "1",
@@ -158,6 +160,7 @@ from pathlib import Path
 root = Path(os.environ['HISTORY_TEST_ROOT'])
 file = Path(sys.argv[1])
 (root / 'editor-initial').write_bytes(file.read_bytes())
+(root / 'editor-rows').write_text(str(os.get_terminal_size(0).lines))
 file.write_bytes(b'edited first\nedited second\n')
 ''')
         self.controllers = []
@@ -188,6 +191,107 @@ file.write_bytes(b'edited first\nedited second\n')
     def seed(self, text, host="example-host", session="work", timestamp="2026-06-01T12:00:00.000Z"):
         entry = dict(id=str(uuid.uuid4()), text=text, host=host, session=session, timestamp=timestamp, status="sent")
         (self.history / f"{entry['id']}.json").write_text(json.dumps(entry))
+
+    def mock_ghostty(self):
+        self.env.update(TERM_PROGRAM="ghostty", OSTYPE="darwin", TMUX_REMOTE_CONTROL_GHOSTTY_RESIZE="1",
+                        HISTORY_TEST_NODE=NODE)
+        for name in ["TMUX", "STY", "SSH_CONNECTION", "SSH_TTY"]:
+            self.env.pop(name, None)
+        (self.bin / "node").unlink()
+        self.program("node", r'''
+import fcntl, os, struct, sys, termios
+from pathlib import Path
+if Path(sys.argv[1]).name == 'ghostty-pane.mjs':
+    root = Path(os.environ['HISTORY_TEST_ROOT'])
+    with (root / 'sizes').open('a') as log:
+        log.write(sys.argv[3] + '\n')
+    if (root / 'fail-resize').exists():
+        sys.exit(2)
+    fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack('HHHH', 8 if sys.argv[3] == 'compact' else 40, 100, 0, 0))
+else:
+    os.execv(os.environ['HISTORY_TEST_NODE'], [os.environ['HISTORY_TEST_NODE'], *sys.argv[1:]])
+''')
+
+    def sizes(self):
+        file = self.root / "sizes"
+        return file.read_text().splitlines() if file.exists() else []
+
+    def test_ghostty_prompt_editor_and_history_sizes(self):
+        self.mock_ghostty()
+        self.seed("old message")
+        controller = self.start()
+        self.assertEqual(os.get_terminal_size(controller.fd).lines, 8)
+        controller.send("draft\x07")
+        controller.wait_prompt(2)
+        self.assertEqual((self.root / "editor-rows").read_text(), "40")
+        self.assertEqual(os.get_terminal_size(controller.fd).lines, 8)
+        controller.open_history()
+        self.assertEqual(os.get_terminal_size(controller.fd).lines, 40)
+        controller.send("\x1b")
+        controller.wait_prompt(3)
+        self.assertEqual(os.get_terminal_size(controller.fd).lines, 8)
+        controller.send("\x1b[107;5u")  # Navigation must not resize.
+        controller.wait_prompt(4)
+        controller.exit()
+        self.assertEqual(self.sizes(), ["compact", "expanded", "compact", "expanded", "compact"])
+
+    def test_ghostty_editor_first_expands_and_compacts_on_exit(self):
+        self.mock_ghostty()
+        controller = Controller(self.env, "--editor", "--once", wait_for_prompt=False)
+        self.controllers.append(controller)
+        controller.wait(lambda: controller.status is not None, "editor-only exit")
+        self.assertEqual(controller.status, 0)
+        self.assertEqual((self.root / "editor-rows").read_text(), "40")
+        self.assertEqual(self.sizes(), ["expanded", "compact"])
+        self.assertEqual(self.sent()[0]["text"], "edited first\nedited second")
+
+    def test_ghostty_failed_editor_compacts_before_exit(self):
+        self.mock_ghostty()
+        self.program("editor", "raise SystemExit(42)\n")
+        controller = self.start()
+        controller.send("\x07")
+        controller.wait(lambda: controller.status is not None, "failed editor exit")
+        self.assertEqual(controller.status, 1)
+        self.assertEqual(self.sizes(), ["compact", "expanded", "compact"])
+        self.assertEqual(self.sent(), [])
+
+    def test_ghostty_history_selection_compacts_without_sending(self):
+        self.mock_ghostty()
+        self.seed("restore only")
+        controller = self.start()
+        controller.open_history()
+        controller.send("\r")
+        controller.wait_prompt(2)
+        self.assertEqual(self.sent(), [])
+        self.assertEqual(self.sizes(), ["compact", "expanded", "compact"])
+        controller.exit()
+
+    def test_ghostty_failure_is_not_retried_and_input_still_works(self):
+        self.mock_ghostty()
+        (self.root / "fail-resize").touch()
+        controller = self.start()
+        controller.send("still works\r")
+        controller.wait_prompt(2)
+        controller.send("\x07")
+        controller.wait_prompt(3)
+        controller.exit()
+        self.assertEqual(self.sent()[0]["text"], "still works")
+        self.assertEqual(self.sizes(), ["compact"])
+
+    def test_ghostty_opt_out_and_nested_terminals(self):
+        self.mock_ghostty()
+        for key, value in [("TMUX_REMOTE_CONTROL_GHOSTTY_RESIZE", "0"), ("TMUX", "/tmp/fake,1,1"),
+                           ("STY", "screen"), ("SSH_CONNECTION", "remote"), ("SSH_TTY", "/dev/pts/0"),
+                           ("TERM_PROGRAM", "other-terminal")]:
+            old = self.env.get(key)
+            self.env[key] = value
+            controller = self.start()
+            controller.exit()
+            self.assertEqual(self.sizes(), [])
+            if old is None:
+                self.env.pop(key)
+            else:
+                self.env[key] = old
 
     def test_linear_history_restores_unsent_draft(self):
         controller = self.start()

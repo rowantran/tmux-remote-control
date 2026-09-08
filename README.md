@@ -234,6 +234,26 @@ TMUX_REMOTE_CONTROL_EDITOR='code --wait' tmux-remote-control attach devbox work
 tmux-remote-control attach devbox work --editor --once
 ```
 
+### Automatic Ghostty pane sizing (macOS)
+
+When the local controller runs in the **bottom pane of two vertically stacked Ghostty panes**, it sizes that pane automatically:
+
+- **Inline prompt:** approximately 8 terminal rows, including the status and borders.
+- **External editor (`Ctrl-G` or `--editor`) or searchable history (`Esc`):** half the available height.
+- **Return to the prompt or exit the controller:** approximately 8 rows again.
+
+This requires Ghostty 1.3 or newer with AppleScript enabled (the default). Allow macOS Automation access to Ghostty if prompted. If access is denied or unavailable, the controller continues without automatic sizing. Restart the controller after granting access.
+
+Sizing affects only the local Ghostty split, not the remote tmux layout. It keeps the controller's pane ID even when focus changes. Single panes, top panes, side-by-side splits, and tabs with more than two panes are not managed. Automatic sizing is also disabled inside local tmux, screen, or SSH sessions. Ghostty's minimum split sizes can prevent an exact 8-row height.
+
+Disable it for one invocation:
+
+```bash
+TMUX_REMOTE_CONTROL_GHOSTTY_RESIZE=0 tmux-remote-control attach devbox work
+```
+
+Or export `TMUX_REMOTE_CONTROL_GHOSTTY_RESIZE=0` in your shell configuration to disable it by default.
+
 ## Message history
 
 History restores message text into the local prompt. **It never sends a message or changes the remote destination by itself.** After recall, you can edit the message, switch to the correct pane with the usual shortcuts, and press Enter to send it.
@@ -293,6 +313,7 @@ History uses the SSH alias and tmux session name as its scope. If either name ch
 - `TMUX_REMOTE_CONTROL_HISTORY`: set to `0` to disable message history (enabled by default)
 - `TMUX_REMOTE_CONTROL_HISTORY_DIR`: override the local history directory
 - `TMUX_REMOTE_CONTROL_HISTORY_PICKER`: `auto` (default), `fzf`, or `builtin`
+- `TMUX_REMOTE_CONTROL_GHOSTTY_RESIZE`: set to `0` to disable automatic local Ghostty pane sizing (enabled by default on macOS)
 
 Command-line host, session, and target arguments override environment defaults.
 
