@@ -61,6 +61,8 @@ chmod +x "$root/bin/editor"
 
 export PATH="$root/bin:$PATH"
 export TMUX_REMOTE_CONTROL_EDITOR="$root/bin/editor"
+# Never automate the developer's real Ghostty panes during tests.
+export TMUX_REMOTE_CONTROL_GHOSTTY_RESIZE=0
 # Never read or write the developer's real message history during tests.
 export TMUX_REMOTE_CONTROL_HISTORY_DIR="$root/history"
 export TMUX_REMOTE_CONTROL_TEST_COMMAND="$root/command"
