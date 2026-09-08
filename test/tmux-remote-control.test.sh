@@ -38,7 +38,7 @@ if [[ "$command" == *'#{session_id}|#{session_name}'* ]]; then
   exit 0
 fi
 if [[ "$command" == *'#{pane_id}|#{session_name}'* ]]; then
-  printf '%%7|work:0.0\n'
+  printf '%%7|work:0.0|work\n'
   exit 0
 fi
 if [[ "$command" == "tmux resize-pane "* || "$command" == "tmux select-pane "* || "$command" == "tmux select-window "* ]]; then
@@ -61,6 +61,8 @@ chmod +x "$root/bin/editor"
 
 export PATH="$root/bin:$PATH"
 export TMUX_REMOTE_CONTROL_EDITOR="$root/bin/editor"
+# Never read or write the developer's real message history during tests.
+export TMUX_REMOTE_CONTROL_HISTORY_DIR="$root/history"
 export TMUX_REMOTE_CONTROL_TEST_COMMAND="$root/command"
 export TMUX_REMOTE_CONTROL_TEST_INPUT="$root/input"
 export TMUX_REMOTE_CONTROL_TEST_SSH_ARGS="$root/ssh-args"

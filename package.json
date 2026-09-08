@@ -29,9 +29,9 @@
     }
   },
   "scripts": {
-    "check": "bash -n bin/tmux-remote-control install-pi-extension.sh && node --check bin/tmux-remote-control-prompt.mjs",
+    "check": "bash -n bin/tmux-remote-control install-pi-extension.sh && for file in bin/*.mjs; do node --check \"$file\" || exit; done",
     "install:pi": "./install-pi-extension.sh",
-    "test": "node --test test/pi-editor.test.mjs && bash test/tmux-remote-control.test.sh",
+    "test": "node --test test/*.test.mjs && bash test/tmux-remote-control.test.sh && python3 test/history-pty.test.py",
     "verify": "npm run check && npm test"
   }
 }
