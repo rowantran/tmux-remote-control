@@ -128,12 +128,69 @@ grep -F '["--print-controller-command"]' "$project_root/pi-extension.ts" >/dev/n
 grep -F 'process.stdout.write(`\x1b]52;c;${encodedCommand}\x07`)' \
   "$project_root/pi-extension.ts" >/dev/null
 
+# Editor fixtures must explicitly confirm the returned draft in a terminal.
+# Keep these tests on the real editor/prompt/SSH path, including fixed targets.
+run_editor_in_pty() {
+  python3 - "$script" "$@" <<'PY'
+import fcntl
+import os
+import pty
+import select
+import signal
+import struct
+import sys
+import termios
+import time
+
+pid, fd = pty.fork()
+if pid == 0:
+    os.execve(sys.argv[1], sys.argv[1:], os.environ)
+fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
+output = bytearray()
+sent = False
+status = None
+deadline = time.monotonic() + 10
+try:
+    while time.monotonic() < deadline:
+        if select.select([fd], [], [], 0.05)[0]:
+            try:
+                output.extend(os.read(fd, 65536))
+            except OSError:
+                pass
+        if not sent and "› ".encode() in output:
+            os.write(fd, b"\r")
+            sent = True
+        child, result = os.waitpid(pid, os.WNOHANG)
+        if child:
+            status = os.waitstatus_to_exitcode(result)
+            break
+    # The child can exit between our last read and waitpid; drain its summary.
+    while select.select([fd], [], [], 0)[0]:
+        try:
+            data = os.read(fd, 65536)
+        except OSError:
+            break
+        if not data:
+            break
+        output.extend(data)
+    sys.stdout.buffer.write(output)
+    if status != 0 or not sent:
+        sys.stderr.buffer.write(output)
+        raise SystemExit(f"editor fixture failed (exit={status}, confirmed={sent})")
+finally:
+    if status is None:
+        os.killpg(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+    os.close(fd)
+PY
+}
+
 # Fixed-pane mode resolves the supplied target to a stable pane id. A long
 # macOS-style temporary path must not be used for the SSH control socket.
 long_temp_root="$root/var/folders/abcdefghijklmnopqrstuvwxyz0123456789/T/very-long-temp-directory"
 mkdir -p "$long_temp_root"
 TMUX_REMOTE_CONTROL_TMPDIR="$long_temp_root" \
-  "$script" attach example-host --target %7 --editor --once >"$root/fixed-output"
+  run_editor_in_pty attach example-host --target %7 --editor --once >"$root/fixed-output"
 grep -F "sh -c" "$root/command" >/dev/null
 grep -F "paste-buffer -p -r" "$root/command" >/dev/null
 grep -F "delete-buffer" "$root/command" >/dev/null
@@ -147,7 +204,7 @@ control_path_argument="$(grep -F 'ControlPath=' "$root/ssh-args")"
 ((${#control_path_argument} < 80))
 
 # Session mode resolves the focused pane for every submission.
-"$script" attach example-host --session %7 --editor --once >"$root/session-output"
+run_editor_in_pty attach example-host --session %7 --editor --once >"$root/session-output"
 grep -F 'focused_pane=$(tmux display-message' "$root/command" >/dev/null
 grep -F '$3' "$root/command" >/dev/null
 grep -F -- '-t "$focused_pane"' "$root/command" >/dev/null
@@ -155,16 +212,16 @@ grep -F -- '-t "$focused_pane"' "$root/command" >/dev/null
 grep -F 'Submitted input to example-host session work ($3), focused pane' "$root/session-output" >/dev/null
 
 # Session selectors are safely quoted, including apostrophes.
-"$script" attach example-host --session "team's work" --editor --once >/dev/null
+run_editor_in_pty attach example-host --session "team's work" --editor --once >/dev/null
 grep -F -- "-t 'team'\\''s work'" "$root/query-command" >/dev/null
 
 # With no selector, one discovered session is selected automatically.
-"$script" attach example-host --editor --once >/dev/null
+run_editor_in_pty attach example-host --editor --once >/dev/null
 grep -F -- "-t '\$3' '#{session_id}|#{session_name}'" "$root/query-command" >/dev/null
 
 # Explicit CLI selection overrides the other mode's environment default.
-TMUX_REMOTE_CONTROL_TARGET=%8 "$script" attach example-host --session %7 --editor --once >/dev/null
-TMUX_REMOTE_CONTROL_SESSION=work "$script" attach example-host --target %7 --editor --once >/dev/null
+TMUX_REMOTE_CONTROL_TARGET=%8 run_editor_in_pty attach example-host --session %7 --editor --once >/dev/null
+TMUX_REMOTE_CONTROL_SESSION=work run_editor_in_pty attach example-host --target %7 --editor --once >/dev/null
 TMUX_REMOTE_CONTROL_SESSION=work "$script" attach example-host --list >/dev/null
 
 run_in_pty() {
@@ -262,10 +319,13 @@ if last_clear < 0 or header not in plain_section or plain_section.find(header) >
     raise SystemExit("controller status was not redrawn above the prompt after resize")
 rendered_lines = plain_section.split(b"\r\n")
 status_row = next((index for index, line in enumerate(rendered_lines) if header in line), -1)
-if status_row < max(0, rows - 4):
+border = "─".encode("utf-8")
+frame_end = next((index for index, line in enumerate(rendered_lines)
+                  if index > status_row + 2 and line.startswith(border)), -1)
+if status_row < 0 or frame_end != rows - 1:
     sys.stderr.buffer.write(output)
     raise SystemExit("controller prompt was not docked at the bottom after resize")
-if status_row + 3 >= len(rendered_lines) or not rendered_lines[status_row + 1].startswith("─".encode("utf-8")) or not rendered_lines[status_row + 2].startswith(prompt) or not rendered_lines[status_row + 3].startswith("─".encode("utf-8")):
+if not rendered_lines[status_row + 1].startswith(border) or not rendered_lines[status_row + 2].startswith(prompt):
     sys.stderr.buffer.write(output)
     raise SystemExit("controller prompt frame was not rendered in the expected order")
 if b"\x1b[38;2;142;192;124mexample-host\x1b[39m" not in section or b"\x1b[38;2;250;189;47mwork\x1b[39m" not in section:
@@ -284,7 +344,7 @@ run_in_pty "68656c6c6f0a"
 [[ "$(cat "$root/input")" == "hello" ]]
 
 export TMUX_REMOTE_CONTROL_TEST_EDITOR_INITIAL="$root/editor-initial"
-run_in_pty "647261667407"
+run_in_pty "647261667407" "0d"
 [[ "$(cat "$root/editor-initial")" == "draft" ]]
 [[ "$(cat "$root/input")" == $'first line\nsecond line' ]]
 unset TMUX_REMOTE_CONTROL_TEST_EDITOR_INITIAL
@@ -431,7 +491,7 @@ SH
   grep -F "tmux-remote-control attach devbox 'test session'" "$root/launcher-output" >/dev/null
 
   TMUX="$socket_path,0,0" TMUX_REMOTE_CONTROL_TEST_DESTINATION="$destination" \
-    "$script" attach example-host --editor --once >"$root/tmux-output"
+    run_editor_in_pty attach example-host --editor --once >"$root/tmux-output"
   for _ in {1..50}; do
     [[ -f "$root/pane-second" ]] && break
     sleep 0.05

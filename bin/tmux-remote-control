@@ -38,7 +38,7 @@ Attach options:
   --target PANE       Always submit to one fixed pane
   --list              List tmux sessions on the remote host
   --once              Exit after one submission instead of prompting again
-  --editor            Open the external editor immediately instead of the inline prompt
+  --editor            Start each message in the external editor, then return to the prompt
 
 At the inline prompt:
   Enter               Submit the current message
@@ -48,7 +48,7 @@ At the inline prompt:
   Alt-Left / Alt-Right Move backward/forward by one word
   Alt-Backspace        Delete the previous word
   Alt-Delete / Alt-D   Delete the next word
-  Ctrl-G              Open the current draft in the external editor
+  Ctrl-G              Edit the current draft externally, then return without submitting
   Ctrl-F              Toggle zoom for the focused remote pane
   Ctrl-H/J/K/L        Select the remote pane down/left/right/up
   Ctrl-P / Ctrl-N     Select the previous/next remote window
@@ -404,20 +404,17 @@ run_editor() {
   local status=0
   resize_local_pane expanded
   /bin/sh -c "$editor \"\$1\"" sh "$prompt_file" || status=$?
-  # --editor stays expanded between submissions; cleanup compacts on exit.
-  if [[ "$editor_first" != "true" ]]; then
-    resize_local_pane compact
-  fi
+  resize_local_pane compact
   ((status == 0)) || die "editor exited unsuccessfully"
+  # Remove only the editor's one final LF/CRLF now. Never trim at send time:
+  # subsequent inline edits or history recall can add intentional newlines.
+  node "$history_helper" prepare "$prompt_file" true || die "could not prepare editor input"
 }
 
-controller_target=""
-if [[ "$editor_first" != "true" ]]; then
-  if [[ -n "$session_id" ]]; then
-    controller_target="$session_name"
-  else
-    controller_target="$pane_location"
-  fi
+if [[ -n "$session_id" ]]; then
+  controller_target="$session_name"
+else
+  controller_target="$pane_location"
 fi
 
 run_navigation_action() {
@@ -452,67 +449,53 @@ run_navigation_action() {
 
 while :; do
   prompt_file="$(mktemp "$temp_root/tmux-remote-control.XXXXXX")"
-  trim_editor_newline="false"
+  prompt_action_file="$(mktemp "$temp_root/tmux-remote-control-action.XXXXXX")"
+  prompt_state_file="$(mktemp "$temp_root/tmux-remote-control-state.XXXXXX")"
 
   if [[ "$editor_first" == "true" ]]; then
-    trim_editor_newline="true"
     run_editor
-  else
-    prompt_action_file="$(mktemp "$temp_root/tmux-remote-control-action.XXXXXX")"
-    prompt_state_file="$(mktemp "$temp_root/tmux-remote-control-state.XXXXXX")"
-    while :; do
-      resize_local_pane compact
-      : >"$prompt_action_file"
-      node "$prompt_helper" "$prompt_file" "$prompt_action_file" "$host" "$controller_target" "$session_name" "$prompt_state_file" </dev/tty >/dev/tty || \
-        die "inline prompt exited unsuccessfully"
-      printf '\r\033[2K' >/dev/tty
-      IFS= read -r prompt_action <"$prompt_action_file" || \
-        die "inline prompt returned no action"
-
-      case "$prompt_action" in
-        submit)
-          break
-          ;;
-        editor)
-          trim_editor_newline="true"
-          run_editor
-          break
-          ;;
-        history)
-          resize_local_pane expanded
-          node "$history_helper" pick "$prompt_file" "$prompt_state_file" "$host" "$session_name" </dev/tty >/dev/tty || true
-          ;;
-        exit)
-          exit 0
-          ;;
-        suspend)
-          kill -TSTP "$$"
-          ;;
-        pane-*|window-*)
-          run_navigation_action "$prompt_action"
-          ;;
-        *)
-          die "inline prompt returned an unknown action: $prompt_action"
-          ;;
-      esac
-    done
-    rm -f "$prompt_action_file" "$prompt_state_file"
-    prompt_action_file=""
-    prompt_state_file=""
   fi
+  while :; do
+    resize_local_pane compact
+    : >"$prompt_action_file"
+    node "$prompt_helper" "$prompt_file" "$prompt_action_file" "$host" "$controller_target" "$session_name" "$prompt_state_file" </dev/tty >/dev/tty || \
+      die "inline prompt exited unsuccessfully"
+    printf '\r\033[2K' >/dev/tty
+    IFS= read -r prompt_action <"$prompt_action_file" || \
+      die "inline prompt returned no action"
 
-  # Store exactly the bytes SSH will receive, including multiline input. Only
-  # the external editor's final newline is removed, once, before recording.
-  node "$history_helper" prepare "$prompt_file" "$trim_editor_newline" || die "could not prepare input"
-  if [[ ! -s "$prompt_file" ]]; then
-    if [[ "$loop" == "true" && "$editor_first" != "true" ]]; then
-      rm -f "$prompt_file"
-      prompt_file=""
-      continue
-    fi
-    exit 0
-  fi
+    case "$prompt_action" in
+      submit)
+        if [[ -s "$prompt_file" ]]; then
+          break
+        fi
+        ;;
+      editor)
+        run_editor
+        ;;
+      history)
+        resize_local_pane expanded
+        node "$history_helper" pick "$prompt_file" "$prompt_state_file" "$host" "$session_name" </dev/tty >/dev/tty || true
+        ;;
+      exit)
+        exit 0
+        ;;
+      suspend)
+        kill -TSTP "$$"
+        ;;
+      pane-*|window-*)
+        run_navigation_action "$prompt_action"
+        ;;
+      *)
+        die "inline prompt returned an unknown action: $prompt_action"
+        ;;
+    esac
+  done
+  rm -f "$prompt_action_file" "$prompt_state_file"
+  prompt_action_file=""
+  prompt_state_file=""
 
+  # Record and send exactly the confirmed draft, without further normalization.
   buffer_name="tmux-remote-control-$$-${RANDOM:-0}"
   cleanup_command="buffer_loaded=false; cleanup_buffer() { if [ \"\$buffer_loaded\" = true ]; then tmux delete-buffer -b '$buffer_name' >/dev/null 2>&1 || true; fi; }; trap cleanup_buffer EXIT"
   if [[ -n "$session_id" ]]; then
