@@ -59,10 +59,18 @@ printf 'first line\nsecond line\n' >"$1"
 SH
 chmod +x "$root/bin/editor"
 
+# Never call the developer's real AeroSpace CLI, even if sizing is enabled.
+cat >"$root/bin/aerospace" <<'SH'
+#!/usr/bin/env bash
+printf 'unexpected AeroSpace CLI invocation\n' >&2
+exit 126
+SH
+chmod +x "$root/bin/aerospace"
+
 export PATH="$root/bin:$PATH"
 export TMUX_REMOTE_CONTROL_EDITOR="$root/bin/editor"
-# Never automate the developer's real Ghostty panes during tests.
-export TMUX_REMOTE_CONTROL_GHOSTTY_RESIZE=0
+# Baseline tests must not automate local desktop windows.
+export TMUX_REMOTE_CONTROL_AEROSPACE_RESIZE=0
 # Never read or write the developer's real message history during tests.
 export TMUX_REMOTE_CONTROL_HISTORY_DIR="$root/history"
 export TMUX_REMOTE_CONTROL_TEST_COMMAND="$root/command"

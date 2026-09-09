@@ -28,7 +28,7 @@ Environment:
   TMUX_REMOTE_CONTROL_HISTORY   Set to 0 to disable message history
   TMUX_REMOTE_CONTROL_HISTORY_DIR  Override the local history directory
   TMUX_REMOTE_CONTROL_HISTORY_PICKER  auto (fzf if available), builtin, or fzf
-  TMUX_REMOTE_CONTROL_GHOSTTY_RESIZE  Set to 0 to disable automatic local pane sizing
+  TMUX_REMOTE_CONTROL_AEROSPACE_RESIZE  Set to 0 to disable automatic local window sizing
 
 Remote launcher:
   HOST                SSH host or local SSH config alias; defaults to the short hostname
@@ -254,7 +254,7 @@ validate_tmux_target() {
 
 prompt_helper=""
 history_helper=""
-ghostty_helper=""
+aerospace_helper=""
 if [[ "$action" == "compose" ]]; then
   command -v node >/dev/null 2>&1 || die "Node.js is required for composing input"
   script_path="${BASH_SOURCE[0]}"
@@ -270,7 +270,7 @@ if [[ "$action" == "compose" ]]; then
   script_dir="$(cd -P "$(dirname "$script_path")" && pwd)"
   prompt_helper="$script_dir/tmux-remote-control-prompt.mjs"
   history_helper="$script_dir/tmux-remote-control-history.mjs"
-  ghostty_helper="$script_dir/ghostty-pane.mjs"
+  aerospace_helper="$script_dir/aerospace-window.mjs"
   [[ -f "$prompt_helper" ]] || die "could not find inline prompt helper: $prompt_helper"
   [[ -f "$history_helper" ]] || die "could not find history helper: $history_helper"
 fi
@@ -291,21 +291,21 @@ prompt_file=""
 prompt_action_file=""
 prompt_state_file=""
 choices=""
-ghostty_resize="false"
-ghostty_mode=""
-resize_local_pane() {
+aerospace_resize="false"
+aerospace_mode=""
+resize_local_window() {
   local mode="$1"
-  [[ "$ghostty_resize" == "true" && "$ghostty_mode" != "$mode" ]] || return 0
-  if node "$ghostty_helper" "$control_dir/ghostty.json" "$mode" </dev/tty >/dev/tty; then
-    ghostty_mode="$mode"
+  [[ "$aerospace_resize" == "true" && "$aerospace_mode" != "$mode" ]] || return 0
+  if node "$aerospace_helper" "$control_dir/aerospace.json" "$mode" </dev/tty >/dev/tty; then
+    aerospace_mode="$mode"
   else
     # Unsupported layouts and automation failures must not block input. Don't
     # retry (or repeatedly ask for macOS permission) until the next attach.
-    ghostty_resize="false"
+    aerospace_resize="false"
   fi
 }
 cleanup() {
-  resize_local_pane compact
+  resize_local_window compact
   ssh -o "ControlPath=$control_path" -O exit "$host" >/dev/null 2>&1 || true
   rm -f "$session_file" "$query_file"
   [[ -z "$prompt_file" ]] || rm -f "$prompt_file"
@@ -392,19 +392,21 @@ fi
 
 editor="${TMUX_REMOTE_CONTROL_EDITOR:-${VISUAL:-${EDITOR:-vi}}}"
 
-# Only manage a native local Ghostty split. Resizing its containing surface
-# from inside local tmux/screen or an SSH session would affect other panes.
+# Only manage a local Ghostty window through AeroSpace, never from nested
+# tmux/screen or SSH. The helper checks the standalone window and tiled layout;
+# Ghostty AppleScript only identifies it, while AeroSpace resizes its pinned ID.
 if [[ "${OSTYPE:-}" == darwin* && "${TERM_PROGRAM:-}" == "ghostty" &&
-      "${TMUX_REMOTE_CONTROL_GHOSTTY_RESIZE:-}" != "0" &&
-      -z "${TMUX:-}${STY:-}${SSH_CONNECTION:-}${SSH_TTY:-}" && -t 0 && -t 1 ]]; then
-  ghostty_resize="true"
+      "${TMUX_REMOTE_CONTROL_AEROSPACE_RESIZE:-}" != "0" &&
+      -z "${TMUX:-}${STY:-}${SSH_CONNECTION:-}${SSH_TTY:-}" && -t 0 && -t 1 ]] &&
+    command -v aerospace >/dev/null 2>&1; then
+  aerospace_resize="true"
 fi
 
 run_editor() {
   local status=0
-  resize_local_pane expanded
+  resize_local_window expanded
   /bin/sh -c "$editor \"\$1\"" sh "$prompt_file" || status=$?
-  resize_local_pane compact
+  resize_local_window compact
   ((status == 0)) || die "editor exited unsuccessfully"
   # Remove only the editor's one final LF/CRLF now. Never trim at send time:
   # subsequent inline edits or history recall can add intentional newlines.
@@ -456,7 +458,7 @@ while :; do
     run_editor
   fi
   while :; do
-    resize_local_pane compact
+    resize_local_window compact
     : >"$prompt_action_file"
     node "$prompt_helper" "$prompt_file" "$prompt_action_file" "$host" "$controller_target" "$session_name" "$prompt_state_file" </dev/tty >/dev/tty || \
       die "inline prompt exited unsuccessfully"
@@ -474,7 +476,7 @@ while :; do
         run_editor
         ;;
       history)
-        resize_local_pane expanded
+        resize_local_window expanded
         node "$history_helper" pick "$prompt_file" "$prompt_state_file" "$host" "$session_name" </dev/tty >/dev/tty || true
         ;;
       exit)

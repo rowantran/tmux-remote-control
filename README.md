@@ -238,25 +238,29 @@ TMUX_REMOTE_CONTROL_EDITOR='code --wait' tmux-remote-control attach devbox work
 tmux-remote-control attach devbox work --editor --once
 ```
 
-### Automatic Ghostty pane sizing (macOS)
+### Automatic AeroSpace window sizing (macOS)
 
-When the local controller runs in the **bottom pane of two vertically stacked Ghostty panes**, it sizes that pane automatically:
+When the local controller runs in the **bottom window of exactly two vertically tiled windows on a visible AeroSpace workspace**, it sizes that window automatically. The controller must occupy a standalone Ghostty window with exactly one tab and one terminal:
 
 - **Inline prompt:** approximately 8 terminal rows, including the status and borders.
-- **External editor (`Ctrl-G` or `--editor`) or searchable history (`Esc`):** half the available height.
+- **External editor (`Ctrl-G` or `--editor`) or searchable history (`Esc`):** half the two windows' combined height, preserving AeroSpace's gaps and margins.
 - **Return to the prompt or exit the controller:** approximately 8 rows again.
 
-This requires Ghostty 1.3 or newer with AppleScript enabled (the default). Allow macOS Automation access to Ghostty if prompted. If access is denied or unavailable, the controller continues without automatic sizing. Restart the controller after granting access.
+The first compact resize may use several small steps to measure the terminal's row height. Once verified, the controller remembers that window height for the current attach and restores it in one resize. Normal transitions check only the controller's Ghostty window, not every window in the app. If the measured rows, window size, or display geometry change, the controller measures again instead of using a stale height.
 
-Sizing affects only the local Ghostty split, not the remote tmux layout. It keeps the controller's pane ID even when focus changes. Single panes, top panes, side-by-side splits, and tabs with more than two panes are not managed. Automatic sizing is also disabled inside local tmux, screen, or SSH sessions. Ghostty's minimum split sizes can prevent an exact 8-row height.
+This requires AeroSpace installed and running, its `aerospace` CLI on the controller's `PATH`, and the usual macOS Accessibility permission for AeroSpace. It also requires Ghostty 1.3 or newer with AppleScript enabled (the default). Allow macOS Automation access to Ghostty if prompted. Ghostty AppleScript only reads metadata to identify the terminal and check that its window has no other tabs or splits. All resizing uses [AeroSpace's `resize --window-id` command](https://nikitabobko.github.io/AeroSpace/commands#resize), so focus changes do not redirect it. The upper window can belong to any app.
 
-Disable it for one invocation:
+Sizing changes the local tiled windows, not the remote tmux layout. Floating or fullscreen windows, accordion layouts, horizontal tiling, top windows, hidden workspaces, and workspaces with fewer or more than two windows are not managed. Ghostty native splits and multiple tabs are excluded. Automatic sizing also requires a local macOS Ghostty TTY and is disabled inside local tmux, screen, or SSH sessions. Window minimum sizes can prevent an exact 8-row height. There is no Ghostty split resizing or fallback.
+
+If the CLI is missing, sizing is silently skipped. Unsupported layouts, denied permissions, and other sizing errors disable automatic sizing for the rest of that attach; input and draft confirmation still work. Restart the controller after fixing the layout or granting access. Returning from the editor or history picker never sends or records a message: press Enter at the input box to confirm it.
+
+Disable sizing for one invocation:
 
 ```bash
-TMUX_REMOTE_CONTROL_GHOSTTY_RESIZE=0 tmux-remote-control attach devbox work
+TMUX_REMOTE_CONTROL_AEROSPACE_RESIZE=0 tmux-remote-control attach devbox work
 ```
 
-Or export `TMUX_REMOTE_CONTROL_GHOSTTY_RESIZE=0` in your shell configuration to disable it by default.
+Or export `TMUX_REMOTE_CONTROL_AEROSPACE_RESIZE=0` in your shell configuration to disable it by default. This replaces the former `TMUX_REMOTE_CONTROL_GHOSTTY_RESIZE` setting.
 
 ## Message history
 
@@ -317,7 +321,7 @@ History uses the SSH alias and tmux session name as its scope. If either name ch
 - `TMUX_REMOTE_CONTROL_HISTORY`: set to `0` to disable message history (enabled by default)
 - `TMUX_REMOTE_CONTROL_HISTORY_DIR`: override the local history directory
 - `TMUX_REMOTE_CONTROL_HISTORY_PICKER`: `auto` (default), `fzf`, or `builtin`
-- `TMUX_REMOTE_CONTROL_GHOSTTY_RESIZE`: set to `0` to disable automatic local Ghostty pane sizing (enabled by default on macOS)
+- `TMUX_REMOTE_CONTROL_AEROSPACE_RESIZE`: set to `0` to disable automatic local AeroSpace window sizing (enabled by default for supported macOS Ghostty layouts)
 
 Command-line host, session, and target arguments override environment defaults.
 

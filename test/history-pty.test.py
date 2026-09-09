@@ -118,7 +118,7 @@ class HistoryTerminalTests(unittest.TestCase):
             "PATH": f"{self.bin}:{os.environ['PATH']}",
             "TERM": "xterm-256color",
             "NO_COLOR": "1",
-            "TMUX_REMOTE_CONTROL_GHOSTTY_RESIZE": "0",  # Never automate real Ghostty panes.
+            "TMUX_REMOTE_CONTROL_AEROSPACE_RESIZE": "0",  # Never resize real desktop windows.
             "TMUX_REMOTE_CONTROL_HISTORY_DIR": str(self.history),
             "TMUX_REMOTE_CONTROL_HISTORY_PICKER": "builtin",
             "TMUX_REMOTE_CONTROL_HISTORY": "1",
@@ -128,6 +128,9 @@ class HistoryTerminalTests(unittest.TestCase):
         }
         for name in ["TMUX_REMOTE_CONTROL_HOST", "TMUX_REMOTE_CONTROL_SESSION", "TMUX_REMOTE_CONTROL_TARGET"]:
             self.env.pop(name, None)
+        # Satisfy CLI discovery without ever calling the real window manager.
+        # Resize tests intercept the helper itself in the node mock below.
+        self.program("aerospace", "raise SystemExit('unexpected AeroSpace CLI invocation')\n")
         self.program("ssh", r'''
 import json, os, sys
 from pathlib import Path
@@ -198,8 +201,8 @@ file.write_bytes(result.read_bytes() if result.exists() else b'edited first\nedi
         entry = dict(id=str(uuid.uuid4()), text=text, host=host, session=session, timestamp=timestamp, status="sent")
         (self.history / f"{entry['id']}.json").write_text(json.dumps(entry))
 
-    def mock_ghostty(self):
-        self.env.update(TERM_PROGRAM="ghostty", OSTYPE="darwin", TMUX_REMOTE_CONTROL_GHOSTTY_RESIZE="1",
+    def mock_aerospace(self):
+        self.env.update(TERM_PROGRAM="ghostty", OSTYPE="darwin", TMUX_REMOTE_CONTROL_AEROSPACE_RESIZE="1",
                         HISTORY_TEST_NODE=NODE)
         for name in ["TMUX", "STY", "SSH_CONNECTION", "SSH_TTY"]:
             self.env.pop(name, None)
@@ -207,7 +210,10 @@ file.write_bytes(result.read_bytes() if result.exists() else b'edited first\nedi
         self.program("node", r'''
 import fcntl, os, struct, sys, termios
 from pathlib import Path
-if Path(sys.argv[1]).name == 'ghostty-pane.mjs':
+if Path(sys.argv[1]).name == 'aerospace-window.mjs':
+    assert len(sys.argv) == 4
+    assert Path(sys.argv[2]).name == 'aerospace.json'
+    assert sys.argv[3] in ('compact', 'expanded')
     root = Path(os.environ['HISTORY_TEST_ROOT'])
     with (root / 'sizes').open('a') as log:
         log.write(sys.argv[3] + '\n')
@@ -222,8 +228,8 @@ else:
         file = self.root / "sizes"
         return file.read_text().splitlines() if file.exists() else []
 
-    def test_ghostty_prompt_editor_and_history_sizes(self):
-        self.mock_ghostty()
+    def test_aerospace_prompt_editor_and_history_sizes(self):
+        self.mock_aerospace()
         self.seed("old message")
         controller = self.start()
         self.assertEqual(os.get_terminal_size(controller.fd).lines, 8)
@@ -244,8 +250,8 @@ else:
         controller.exit()
         self.assertEqual(self.sizes(), ["compact", "expanded", "compact", "expanded", "compact"])
 
-    def test_ghostty_editor_first_compacts_and_waits_for_confirmation(self):
-        self.mock_ghostty()
+    def test_aerospace_editor_first_compacts_and_waits_for_confirmation(self):
+        self.mock_aerospace()
         controller = self.start("--editor", "--once")
         self.assertEqual((self.root / "editor-rows").read_text(), "40")
         self.assertEqual(os.get_terminal_size(controller.fd).lines, 8)
@@ -259,8 +265,8 @@ else:
         self.assertEqual(self.sent()[0]["text"], "edited first\nedited second")
         self.assertEqual(len(self.records()), 1)
 
-    def test_ghostty_failed_editor_compacts_before_exit(self):
-        self.mock_ghostty()
+    def test_aerospace_failed_editor_compacts_before_exit(self):
+        self.mock_aerospace()
         self.program("editor", "raise SystemExit(42)\n")
         controller = self.start()
         controller.send("\x07")
@@ -269,8 +275,8 @@ else:
         self.assertEqual(self.sizes(), ["compact", "expanded", "compact"])
         self.assertEqual(self.sent(), [])
 
-    def test_ghostty_history_selection_compacts_without_sending(self):
-        self.mock_ghostty()
+    def test_aerospace_history_selection_compacts_without_sending(self):
+        self.mock_aerospace()
         self.seed("restore only")
         controller = self.start()
         controller.open_history()
@@ -280,8 +286,23 @@ else:
         self.assertEqual(self.sizes(), ["compact", "expanded", "compact"])
         controller.exit()
 
-    def test_ghostty_failure_is_not_retried_and_input_still_works(self):
-        self.mock_ghostty()
+    def test_aerospace_cleanup_compacts_when_terminated_in_history(self):
+        self.mock_aerospace()
+        self.seed("restore only")
+        controller = self.start()
+        controller.open_history()
+        self.assertEqual(os.get_terminal_size(controller.fd).lines, 40)
+        os.killpg(controller.pid, signal.SIGTERM)
+        controller.wait(lambda: controller.status is not None, "controller termination in history")
+        self.assertIn(controller.status, [-signal.SIGTERM, 128 + signal.SIGTERM])
+        self.assertEqual(self.sizes(), ["compact", "expanded", "compact"])
+        self.assertEqual(os.get_terminal_size(controller.fd).lines, 8)
+        self.assertEqual(controller.prompts(), 1)
+        self.assertEqual(self.sent(), [])
+        self.assertEqual(len(self.records()), 1)
+
+    def test_aerospace_failure_is_not_retried_and_input_still_works(self):
+        self.mock_aerospace()
         (self.root / "fail-resize").touch()
         controller = self.start()
         controller.send("still works\r")
@@ -292,11 +313,31 @@ else:
         self.assertEqual(self.sent()[0]["text"], "still works")
         self.assertEqual(self.sizes(), ["compact"])
 
-    def test_ghostty_opt_out_and_nested_terminals(self):
-        self.mock_ghostty()
-        for key, value in [("TMUX_REMOTE_CONTROL_GHOSTTY_RESIZE", "0"), ("TMUX", "/tmp/fake,1,1"),
+    def test_aerospace_missing_cli_silently_skips_sizing(self):
+        self.mock_aerospace()
+        (self.bin / "aerospace").unlink()
+        # Exclude every ambient PATH entry, including any installed AeroSpace.
+        for name in ["bash", "dirname", "mktemp", "rm", "sed", "stty"]:
+            (self.bin / name).symlink_to(shutil.which(name))
+        self.env["PATH"] = str(self.bin)
+        self.assertIsNone(shutil.which("aerospace", path=self.env["PATH"]))
+        controller = self.start()
+        self.assertEqual(os.get_terminal_size(controller.fd).lines, 24)
+        controller.send("still works\r")
+        controller.wait_prompt(2)
+        controller.send("\x07")
+        controller.wait_prompt(3)
+        self.assertEqual((self.root / "editor-rows").read_text(), "24")
+        controller.exit()
+        self.assertEqual(self.sent(), [{"text": "still works", "target": "A"}])
+        self.assertEqual(self.sizes(), [])
+        self.assertNotIn("aerospace", controller.plain().lower())
+
+    def test_aerospace_opt_out_and_nested_terminals(self):
+        self.mock_aerospace()
+        for key, value in [("TMUX_REMOTE_CONTROL_AEROSPACE_RESIZE", "0"), ("TMUX", "/tmp/fake,1,1"),
                            ("STY", "screen"), ("SSH_CONNECTION", "remote"), ("SSH_TTY", "/dev/pts/0"),
-                           ("TERM_PROGRAM", "other-terminal")]:
+                           ("TERM_PROGRAM", "other-terminal"), ("OSTYPE", "linux-gnu")]:
             old = self.env.get(key)
             self.env[key] = value
             controller = self.start()
@@ -398,7 +439,7 @@ else:
         controller.exit()
 
     def test_editor_draft_shows_overflow_and_can_be_edited_after_switching_panes(self):
-        self.mock_ghostty()
+        self.mock_aerospace()
         text = "\n".join(f"edited line {index}" for index in range(1, 11))
         (self.root / "editor-result").write_text(text + "\n")
         controller = self.start()
