@@ -240,17 +240,21 @@ tmux-remote-control attach devbox work --editor --once
 
 ### Automatic AeroSpace window sizing (macOS)
 
-When the local controller runs in the **bottom window of exactly two vertically tiled windows on a visible AeroSpace workspace**, it sizes that window automatically. The controller must occupy a standalone Ghostty window with exactly one tab and one terminal:
+When the local controller runs in the **bottom window of a two-window vertical column on a visible AeroSpace workspace**, it sizes that window automatically. The column can sit beside other windows or inside an accordion layout; the workspace does not need to contain only those two windows. The controller must occupy a standalone Ghostty window with exactly one tab and one terminal:
 
 - **Inline prompt:** approximately 8 terminal rows, including the status and borders.
 - **External editor (`Ctrl-G` or `--editor`) or searchable history (`Esc`):** half the two windows' combined height, preserving AeroSpace's gaps and margins.
 - **Return to the prompt or exit the controller:** approximately 8 rows again.
 
-The first compact resize may use several small steps to measure the terminal's row height. Once verified, the controller remembers that window height for the current attach and restores it in one resize. Normal transitions check only the controller's Ghostty window, not every window in the app. If the measured rows, window size, or display geometry change, the controller measures again instead of using a stale height.
+The initial shrink reads Ghostty's terminal pixel dimensions from the kernel and accounts for display scaling, so it can go directly to approximately 8 rows without calibration resizes. This measurement does not read keyboard input or send terminal queries. It uses `/usr/bin/perl`, included with macOS. If pixel dimensions are unavailable, or a window starts smaller than the compact target, bounded calibration remains a fallback.
+
+Once verified, the controller remembers the compact window height for the current attach and restores it in one resize. Normal transitions check only the controller's Ghostty window, not every window in the app. If the measured rows, window size, or display geometry change, the controller measures again instead of using a stale height.
 
 This requires AeroSpace installed and running, its `aerospace` CLI on the controller's `PATH`, and the usual macOS Accessibility permission for AeroSpace. It also requires Ghostty 1.3 or newer with AppleScript enabled (the default). Allow macOS Automation access to Ghostty if prompted. Ghostty AppleScript only reads metadata to identify the terminal and check that its window has no other tabs or splits. All resizing uses [AeroSpace's `resize --window-id` command](https://nikitabobko.github.io/AeroSpace/commands#resize), so focus changes do not redirect it. The upper window can belong to any app.
 
-Sizing changes the local tiled windows, not the remote tmux layout. Floating or fullscreen windows, accordion layouts, horizontal tiling, top windows, hidden workspaces, and workspaces with fewer or more than two windows are not managed. Ghostty native splits and multiple tabs are excluded. Automatic sizing also requires a local macOS Ghostty TTY and is disabled inside local tmux, screen, or SSH sessions. Window minimum sizes can prevent an exact 8-row height. There is no Ghostty split resizing or fallback.
+Sizing changes only the vertical window pair, not other windows or the remote tmux layout. Both windows must report vertical tiling, have aligned left/right edges, and together span the workspace's full tiled height. Other tiled windows must sit beside the column or be full-height accordion windows overlapping it. Floating windows outside the pair are ignored. This supports, for example, two stacked Ghostty windows within a horizontal accordion workspace that also contains Firefox and Notion.
+
+AeroSpace does not expose container IDs through its supported CLI, so ambiguous groups are skipped rather than guessing which windows share a parent. Columns with three or more vertical tiles, partial-height groups, partial overlaps, top controllers, fullscreen tiling layouts, and hidden workspaces are not managed. The pair itself cannot be floating, horizontal, or accordion. Ghostty native splits and multiple tabs are excluded. Automatic sizing also requires a local macOS Ghostty TTY and is disabled inside local tmux, screen, or SSH sessions. Window minimum sizes can prevent an exact 8-row height. There is no Ghostty split resizing or fallback.
 
 If the CLI is missing, sizing is silently skipped. Unsupported layouts, denied permissions, and other sizing errors disable automatic sizing for the rest of that attach; input and draft confirmation still work. Restart the controller after fixing the layout or granting access. Returning from the editor or history picker never sends or records a message: press Enter at the input box to confirm it.
 

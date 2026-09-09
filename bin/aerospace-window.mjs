@@ -47,13 +47,34 @@ function run(argv) {
 }
 `;
 
+// Query AppKit separately from Ghostty's scripting dictionary. It runs in
+// parallel with the existing snapshot, so it adds no serial automation scan.
+export const SCREEN_SCALES_SCRIPT = `
+function run() {
+  ObjC.import("AppKit");
+  var screens = $.NSScreen.screens;
+  var scales = [];
+  for (var i = 0; i < screens.count; i++) scales.push(Number(screens.objectAtIndex(i).backingScaleFactor));
+  return JSON.stringify(scales);
+}
+`;
+
 // Post-resize measurement needs neither another Ghostty scan nor AeroSpace query.
 export const BOUNDS_SCRIPT = `${READ_BOUNDS}
 function run(argv) { return JSON.stringify(windowBounds(argv.map(Number))); }
 `;
 
+// macOS TIOCGWINSZ returns four native-endian unsigned shorts. Perl is supplied
+// by macOS and gives access to ioctl without a compiled addon or terminal query.
+// No read/sysread: this cannot consume typing or leave query replies in input.
+export const TERMINAL_SIZE_SCRIPT = `
+my $size = pack("S4", 0, 0, 0, 0);
+ioctl(STDIN, 0x40087468, $size) or die "TIOCGWINSZ failed: $!";
+print join(" ", unpack("S4", $size)), "\\n";
+`;
+
 export const WINDOW_FORMAT = ["window-id", "window-title", "app-bundle-id", "workspace", "monitor-id",
-  "window-parent-container-layout", "workspace-root-container-layout", "window-is-fullscreen", "workspace-is-visible"]
+  "monitor-appkit-nsscreen-screens-id", "window-parent-container-layout", "workspace-root-container-layout", "window-is-fullscreen", "workspace-is-visible"]
   .map((field) => `%{${field}}`).join(" ");
 
 function run(command, args, { terminalInput = false, timeout = 2500 } = {}) {
@@ -90,16 +111,18 @@ function run(command, args, { terminalInput = false, timeout = 2500 } = {}) {
 export function systemIO(command = run) {
   return {
     snapshot: async (state) => {
-      const [windows, native] = await Promise.all([
+      const [windows, native, scales] = await Promise.all([
         command("aerospace", ["list-windows", "--all", "--json", "--format", WINDOW_FORMAT]).then(JSON.parse),
         command("osascript", ["-l", "JavaScript", "-e", SNAPSHOT_SCRIPT, ...(state ? [state.ghosttyWindowId] : [])]).then(JSON.parse),
+        command("osascript", ["-l", "JavaScript", "-e", SCREEN_SCALES_SCRIPT]).then(JSON.parse).catch(() => []),
       ]);
       const bounds = new Map(native.bounds.map((w) => [w.id, w]));
       return {
         terminals: native.terminals,
         windows: windows.map((w) => ({
           id: w["window-id"], title: w["window-title"], appId: w["app-bundle-id"],
-          workspace: w.workspace, monitor: w["monitor-id"], layout: w["window-parent-container-layout"],
+          workspace: w.workspace, monitor: w["monitor-id"], scale: scales[w["monitor-appkit-nsscreen-screens-id"] - 1],
+          layout: w["window-parent-container-layout"],
           rootLayout: w["workspace-root-container-layout"], fullscreen: w["window-is-fullscreen"],
           visible: w["workspace-is-visible"], bounds: bounds.get(w["window-id"])?.bounds,
           onScreen: bounds.get(w["window-id"])?.onScreen,
@@ -122,6 +145,14 @@ export function systemIO(command = run) {
       if (!Number.isInteger(rows) || rows < 1 || rows > 65535) throw new Error("invalid terminal size");
       return rows;
     },
+    terminalSize: async () => {
+      const values = (await command("/usr/bin/perl", ["-e", TERMINAL_SIZE_SCRIPT], { terminalInput: true })).trim().split(/\s+/).map(Number);
+      if (values.length !== 4 || values.some((n) => !Number.isInteger(n) || n < 1 || n >= 65535)) {
+        throw new Error("invalid terminal pixel dimensions");
+      }
+      const [rows, columns, pixelWidth, pixelHeight] = values;
+      return { rows, columns, pixelWidth, pixelHeight };
+    },
     title: (title) => process.stdout.write(`\x1b]2;${title.replace(/[\x00-\x1f\x7f-\x9f]/g, "")}\x07`),
     sleep,
   };
@@ -137,16 +168,47 @@ function validBounds(bounds) {
     bounds.Width > 0 && bounds.Height > 0;
 }
 
-function verticalPair(snapshot, id) {
+// AeroSpace exposes each leaf's parent layout, but not parent IDs or the tree.
+// Recognize only unambiguous full-height columns: two aligned v_tiles leaves,
+// with other tiled windows beside the column or full-height accordion windows
+// behind it. Merely choosing the nearest window above could pick a non-sibling,
+// or miss a third child container whose windows would also be resized.
+export function verticalPair(snapshot, id) {
   const window = snapshot.windows.find((w) => w.id === id);
-  if (!window || window.appId !== "com.mitchellh.ghostty") return null;
-  const pair = snapshot.windows.filter((w) => w.workspace === window.workspace);
-  if (pair.length !== 2 || pair.some((w) => !Number.isSafeInteger(w.id) || w.id <= 0 ||
-    w.layout !== "v_tiles" || w.rootLayout !== "v_tiles" || w.fullscreen !== false ||
+  if (!window || window.appId !== "com.mitchellh.ghostty" || window.layout !== "v_tiles") return null;
+  const layouts = ["h_tiles", "v_tiles", "h_accordion", "v_accordion"];
+  const workspace = snapshot.windows.filter((w) => w.workspace === window.workspace);
+  if (new Set(workspace.map((w) => w.id)).size !== workspace.length) return null;
+  // Floating windows do not participate in AeroSpace's tiled resize operation.
+  const tiled = workspace.filter((w) => w.layout !== "floating");
+  if (tiled.some((w) => !Number.isSafeInteger(w.id) || w.id <= 0 || !layouts.includes(w.layout) ||
+    !layouts.includes(w.rootLayout) || w.rootLayout !== window.rootLayout || w.fullscreen !== false ||
     w.visible !== true || w.onScreen !== true || w.monitor !== window.monitor || !validBounds(w.bounds))) return null;
-  const sibling = pair.find((w) => w.id !== id);
-  if (!sibling) return null;
-  return stacked(window, sibling) ? { window, sibling } : null;
+  const column = tiled.filter((w) => w.layout === "v_tiles" &&
+    Math.abs(w.bounds.X - window.bounds.X) <= 2 && Math.abs(w.bounds.Width - window.bounds.Width) <= 2);
+  if (column.length !== 2) return null;
+  const sibling = column.find((w) => w.id !== id);
+  if (!sibling || !stacked(window, sibling)) return null;
+
+  const top = sibling.bounds.Y;
+  const bottom = window.bounds.Y + window.bounds.Height;
+  const left = window.bounds.X;
+  const right = left + window.bounds.Width;
+  for (const other of tiled) {
+    if (other.id === id || other.id === sibling.id) continue;
+    const frame = other.bounds;
+    // Require the pair to fill the workspace's vertical extent. Otherwise a
+    // further child (possibly a nested horizontal/accordion group) above or
+    // below this pair could share the same vertical parent and receive a resize.
+    if (frame.Y < top - 2 || frame.Y + frame.Height > bottom + 2) return null;
+    const overlap = Math.min(right, frame.X + frame.Width) - Math.max(left, frame.X);
+    if (overlap <= 2) continue; // A separate column.
+    // Accordion siblings can overlap the entire column. Partial-height or
+    // tiled overlaps are ambiguous; never infer a safe pair through them.
+    if (!["h_accordion", "v_accordion"].includes(other.layout) ||
+        Math.abs(frame.Y - top) > 2 || Math.abs(frame.Y + frame.Height - bottom) > 2) return null;
+  }
+  return { window, sibling };
 }
 
 function stacked(window, sibling) {
@@ -204,7 +266,7 @@ async function inspect(io, state) {
 }
 
 function context({ window, sibling }) {
-  return JSON.stringify([window.monitor, window.bounds.X, window.bounds.Width, sibling.bounds.Y,
+  return JSON.stringify([window.monitor, window.scale, window.bounds.X, window.bounds.Width, sibling.bounds.Y,
     window.bounds.Height + sibling.bounds.Height, window.bounds.Y - sibling.bounds.Y - sibling.bounds.Height]);
 }
 
@@ -229,9 +291,26 @@ function validCompact(cache, position) {
     cache.anchor.rows === position.rows;
 }
 
+// Ghostty supplies the unpadded viewport size through TIOCGWINSZ. For R rows,
+// pixelHeight = R * cellHeight + remainder, where 0 <= remainder < cellHeight.
+// Scaling that viewport to 8/R gives eight rows without needing to infer the
+// font metrics. Subtract only viewport height; keep title bars and padding.
+// Source: Ghostty v1.3.1 src/termio/Termio.zig resize() and renderer/size.zig.
+export function initialCompactDelta(position, size) {
+  if (!size || !Number.isFinite(position.window.scale) || position.window.scale < 1 || position.window.scale > 4 ||
+      ![size.rows, size.columns, size.pixelWidth, size.pixelHeight].every((n) => Number.isInteger(n) && n > 0 && n < 65535) ||
+      size.rows !== position.rows || size.rows <= COMPACT_ROWS || size.pixelWidth < size.columns || size.pixelHeight < size.rows) return null;
+  const viewportHeight = size.pixelHeight / position.window.scale;
+  const viewportWidth = size.pixelWidth / position.window.scale;
+  if (viewportHeight > position.window.bounds.Height || viewportWidth > position.window.bounds.Width ||
+      viewportHeight / size.rows < 1) return null;
+  // Round the shrink down so point rounding cannot remove an extra row.
+  return -Math.floor(viewportHeight * (size.rows - COMPACT_ROWS) / size.rows);
+}
+
 async function move(io, state, before, points, verifiedTarget = false) {
-  // Only an already observed compact height may bypass the half-height limit.
-  // Unknown font sizes still use bounded calibration; no guessed large shrinks.
+  // An observed compact height or a target computed from kernel pixel dimensions
+  // can bypass the half-height limit. Unknown sizes still use bounded calibration.
   const donor = points < 0 ? before.window : before.sibling;
   const limit = verifiedTarget ? 65535 : Math.floor(donor.bounds.Height / 2);
   points = Math.sign(points) * Math.min(Math.abs(points), limit, 65535);
@@ -320,6 +399,22 @@ export async function resizeAerospace(state, mode, io = systemIO()) {
     // Native limits or an in-flight font change can invalidate a cached target.
     // Recalibrate rather than saving a requested (but unobserved) frame height.
     forgetCompact(state);
+    position = await inspect(io, state);
+  }
+
+  if (position.rows > COMPACT_ROWS + 1 && io.terminalSize) {
+    let size;
+    try { size = await io.terminalSize(); } catch { /* Older systems can use bounded calibration. */ }
+    const points = initialCompactDelta(position, size);
+    if (points !== null) {
+      position = await move(io, state, position, points, true);
+      // Native minimum sizes may clamp the requested height. Do not ratchet
+      // further: the direct request already targeted eight rows safely.
+      rememberCompact(state, position);
+      return true;
+    }
+    // The size query may have raced a manual resize. Validate again before the
+    // fallback rather than calibrating from a stale frame or row count.
     position = await inspect(io, state);
   }
 

@@ -201,6 +201,38 @@ file.write_bytes(result.read_bytes() if result.exists() else b'edited first\nedi
         entry = dict(id=str(uuid.uuid4()), text=text, host=host, session=session, timestamp=timestamp, status="sent")
         (self.history / f"{entry['id']}.json").write_text(json.dumps(entry))
 
+    def test_aerospace_pixel_size_query_preserves_pending_input_and_terminal_mode(self):
+        import subprocess
+        import sys
+        if sys.platform != "darwin" or not Path("/usr/bin/perl").exists():
+            self.skipTest("macOS ioctl helper requires the system Perl")
+        master, slave = pty.openpty()
+        try:
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 28, 100, 1600, 1120))
+            attributes = termios.tcgetattr(slave)
+            os.write(master, b"keep this pending input\n")
+            # Exercise the real ioctl helper on an isolated PTY, not a desktop
+            # terminal. It must read dimensions without consuming this line.
+            source = r'''
+import { readSync } from 'node:fs';
+import { systemIO } from './bin/aerospace-window.mjs';
+const size = await systemIO().terminalSize();
+const buffer = Buffer.alloc(100);
+const length = readSync(0, buffer, 0, buffer.length, null);
+console.log(JSON.stringify({ size, input: buffer.subarray(0, length).toString() }));
+'''
+            result = subprocess.run([NODE, "--input-type=module", "-e", source], cwd=PROJECT,
+                                    stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    env=self.env, timeout=10, check=True)
+            self.assertEqual(json.loads(result.stdout), {
+                "size": {"rows": 28, "columns": 100, "pixelWidth": 1600, "pixelHeight": 1120},
+                "input": "keep this pending input\n",
+            })
+            self.assertEqual(termios.tcgetattr(slave), attributes)
+        finally:
+            os.close(master)
+            os.close(slave)
+
     def mock_aerospace(self):
         self.env.update(TERM_PROGRAM="ghostty", OSTYPE="darwin", TMUX_REMOTE_CONTROL_AEROSPACE_RESIZE="1",
                         HISTORY_TEST_NODE=NODE)
