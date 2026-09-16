@@ -49,14 +49,15 @@ class RemoteControlEditor extends CustomEditor {
 }
 
 export default function tmuxRemoteControl(pi: ExtensionAPI): void {
-	let active = false;
 	let changing = false;
+	let remoteEditor: ReturnType<ExtensionContext["ui"]["getEditorComponent"]>;
 	let previousEditor: ReturnType<ExtensionContext["ui"]["getEditorComponent"]>;
+	let autoEnablePending = false;
 
 	function disable(ctx: ExtensionContext): void {
 		ctx.ui.setEditorComponent(previousEditor);
 		previousEditor = undefined;
-		active = false;
+		remoteEditor = undefined;
 		ctx.ui.notify("Remote input disabled. The local controller can stay open.", "info");
 	}
 
@@ -89,17 +90,20 @@ export default function tmuxRemoteControl(pi: ExtensionAPI): void {
 			process.stdout.write(`\x1b]52;c;${encodedCommand}\x07`);
 		}
 
+		const editor = (
+			tui: CustomEditorArguments[0],
+			theme: CustomEditorArguments[1],
+			keybindings: CustomEditorArguments[2],
+		) =>
+			new RemoteControlEditor(
+				tui,
+				theme,
+				keybindings,
+				(hasText, text) => ctx.ui.theme.fg(hasText ? "warning" : "accent", text),
+			);
 		previousEditor = ctx.ui.getEditorComponent();
-		ctx.ui.setEditorComponent(
-			(tui, theme, keybindings) =>
-				new RemoteControlEditor(
-					tui,
-					theme,
-					keybindings,
-					(hasText, text) => ctx.ui.theme.fg(hasText ? "warning" : "accent", text),
-				),
-		);
-		active = true;
+		ctx.ui.setEditorComponent(editor);
+		remoteEditor = editor;
 
 		if (controllerCommand) ctx.ui.notify(`Copied the local controller command:\n${controllerCommand}`, "info");
 	}
@@ -108,24 +112,39 @@ export default function tmuxRemoteControl(pi: ExtensionAPI): void {
 		if (changing) return;
 		changing = true;
 		try {
-			if (active) disable(ctx);
-			else await enable(ctx);
+			if (remoteEditor && ctx.ui.getEditorComponent() === remoteEditor) {
+				disable(ctx);
+			} else {
+				// Another extension may have replaced our editor after activation.
+				// Treat the currently visible editor as disabled instead of acting
+				// on stale state and incorrectly reporting that we disabled it.
+				remoteEditor = undefined;
+				previousEditor = undefined;
+				await enable(ctx);
+			}
 		} finally {
 			changing = false;
 		}
 	}
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", (_event, ctx) => {
+		autoEnablePending = false;
 		if (ctx.mode !== "tui" || !/^%[0-9]+$/.test(process.env.TMUX_PANE ?? "")) return;
-		let autoEnable: boolean;
 		try {
-			autoEnable = piAutoEnable(loadConfig());
+			autoEnablePending = piAutoEnable(loadConfig());
 		} catch (error) {
 			const detail = error instanceof Error ? error.message : String(error);
 			ctx.ui.notify(`Could not load tmux-remote-control configuration: ${detail}`, "warning");
-			return;
 		}
-		if (autoEnable) await enable(ctx, { copyControllerCommand: false });
+	});
+
+	// Pi emits this only after every extension's session_start handler finishes.
+	// Apply the editor here so startup-time editor extensions cannot overwrite it
+	// while leaving our toggle state active.
+	pi.on("resources_discover", async (_event, ctx) => {
+		if (!autoEnablePending) return;
+		autoEnablePending = false;
+		await enable(ctx, { copyControllerCommand: false });
 	});
 
 	pi.registerShortcut(SHORTCUT, {

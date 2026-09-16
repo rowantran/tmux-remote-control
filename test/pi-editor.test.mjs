@@ -23,7 +23,7 @@ const warning = text => `\x1b[33m${text}\x1b[39m`;
 const plain = lines => lines.map(stripTerminalSequences);
 
 async function setup(initialText = "", { activate = true } = {}) {
-  let toggle, sessionStart, execCalls = 0;
+  let toggle, sessionStart, resourcesDiscover, execCalls = 0;
   const tui = { terminal: { rows: 24 }, requestRender() {} };
   const identity = text => text;
   const theme = {
@@ -51,7 +51,10 @@ async function setup(initialText = "", { activate = true } = {}) {
   };
   ui.editor.setText(initialText);
   const pi = {
-    on: (event, handler) => { if (event === "session_start") sessionStart = handler; },
+    on: (event, handler) => {
+      if (event === "session_start") sessionStart = handler;
+      if (event === "resources_discover") resourcesDiscover = handler;
+    },
     registerShortcut: (_key, spec) => { toggle = spec.handler; },
     registerCommand() {},
     async exec(command, args) {
@@ -85,7 +88,11 @@ async function setup(initialText = "", { activate = true } = {}) {
     execCalls: () => execCalls,
     toggle: () => invoke(() => toggle(ctx)),
     disable: () => invoke(() => toggle(ctx)),
-    start: () => invoke(() => sessionStart({ reason: "startup" }, ctx)),
+    start: (afterSessionStart) => invoke(async () => {
+      await sessionStart({ reason: "startup" }, ctx);
+      afterSessionStart?.();
+      await resourcesDiscover({ reason: "startup", cwd: "/tmp" }, ctx);
+    }),
   };
 }
 
@@ -310,13 +317,14 @@ test("configured tmux sessions auto-enable without copying, then toggle off and 
     process.env.TMUX_PANE = "%42";
 
     const state = await setup("", { activate: false });
-    await state.start();
+    const startupEditor = () => new Editor({ terminal: { rows: 24 }, requestRender() {} }, { borderColor: text => text });
+    await state.start(() => state.ui.setEditorComponent(startupEditor));
     assertCollapsed(state.editor);
     assert.equal(state.execCalls(), 0, "auto-enable must not generate a redundant controller command");
     assert.deepEqual(state.clipboard, []);
 
     await state.toggle();
-    assert.equal(state.ui.factory, state.originalFactory);
+    assert.equal(state.ui.factory, startupEditor, "disabling must restore the last startup editor");
     assert.match(state.notices.at(-1)[0], /Remote input disabled/);
 
     await state.toggle();
@@ -331,4 +339,21 @@ test("configured tmux sessions auto-enable without copying, then toggle off and 
     else process.env.TMUX_PANE = previousPane;
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("toggle repairs stale state when another extension replaces the remote editor", async () => {
+  const state = await setup();
+  const replacement = state.originalFactory;
+  state.ui.setEditorComponent(replacement);
+  assert.ok(!state.editor.render(80).join("").includes("📡"));
+
+  await state.toggle();
+  assertCollapsed(state.editor);
+  assert.equal(state.execCalls(), 2);
+  assert.equal(state.clipboard.length, 2);
+  assert.match(state.notices.at(-1)[0], /Copied the local controller command/);
+
+  await state.toggle();
+  assert.equal(state.ui.factory, replacement);
+  assert.match(state.notices.at(-1)[0], /Remote input disabled/);
 });
