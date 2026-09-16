@@ -4,11 +4,17 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
+  tmux-remote-control start HOST SESSION [-- COMMAND [ARG...]]
   tmux-remote-control [HOST]
   tmux-remote-control --print-controller-command [HOST]
   tmux-remote-control attach HOST [SESSION]
   tmux-remote-control attach --host HOST [--session SESSION_OR_PANE | --target PANE]
   tmux-remote-control attach HOST --list
+
+Run `tmux-remote-control start HOST SESSION` in a local macOS Ghostty terminal
+to create or reuse a remote session, open a controller window, and attach the
+current terminal to the remote session. COMMAND runs only for a new session.
+See `tmux-remote-control start --help` for details.
 
 Run `tmux-remote-control [HOST]` inside the remote tmux pane. It copies a local
 controller command containing the SSH host and current tmux session:
@@ -147,7 +153,27 @@ copy_controller_command() {
   fi
 }
 
+resolve_script_dir() {
+  script_path="${BASH_SOURCE[0]}"
+  while [[ -L "$script_path" ]]; do
+    script_dir="$(cd -P "$(dirname "$script_path")" && pwd)"
+    link_target="$(readlink "$script_path")"
+    if [[ "$link_target" == /* ]]; then
+      script_path="$link_target"
+    else
+      script_path="$script_dir/$link_target"
+    fi
+  done
+  script_dir="$(cd -P "$(dirname "$script_path")" && pwd)"
+}
+
 case "${1:-}" in
+  start)
+    shift
+    command -v node >/dev/null 2>&1 || die "Node.js is required for starting a local controller"
+    resolve_script_dir
+    exec node "$script_dir/tmux-remote-control-start.mjs" "$@"
+    ;;
   attach)
     shift
     ;;
@@ -257,17 +283,7 @@ history_helper=""
 aerospace_helper=""
 if [[ "$action" == "compose" ]]; then
   command -v node >/dev/null 2>&1 || die "Node.js is required for composing input"
-  script_path="${BASH_SOURCE[0]}"
-  while [[ -L "$script_path" ]]; do
-    script_dir="$(cd -P "$(dirname "$script_path")" && pwd)"
-    link_target="$(readlink "$script_path")"
-    if [[ "$link_target" == /* ]]; then
-      script_path="$link_target"
-    else
-      script_path="$script_dir/$link_target"
-    fi
-  done
-  script_dir="$(cd -P "$(dirname "$script_path")" && pwd)"
+  resolve_script_dir
   prompt_helper="$script_dir/tmux-remote-control-prompt.mjs"
   history_helper="$script_dir/tmux-remote-control-history.mjs"
   aerospace_helper="$script_dir/aerospace-window.mjs"

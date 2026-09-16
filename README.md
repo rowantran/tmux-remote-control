@@ -6,9 +6,47 @@ Compose input on a local device with no network typing latency, then send each c
 
 ## Workflow
 
-There are two command modes.
+### Start both terminals locally (macOS/Ghostty)
 
-### 1. Copy a controller command from the remote tmux session
+Run one command in a **local Ghostty terminal**, outside tmux, screen, or SSH:
+
+```bash
+tmux-remote-control start devbox work
+```
+
+The command creates or reuses the exact remote tmux session named `work`, opens a new local Ghostty window for the controller, then attaches the current terminal to the remote session. No clipboard, manual paste, or background service is needed.
+
+```text
+Current window → SSH → remote tmux session (output and direct interaction)
+New window     → local input → the same remote tmux session
+```
+
+To start a program in a **new** session:
+
+```bash
+tmux-remote-control start devbox work -- pi
+tmux-remote-control start devbox work -- isara pi run
+```
+
+Arguments after `--` are passed to the program as literal arguments, not as a shell command string. If the session already exists, the program and its arguments are ignored: nothing is typed into the session and its application is not restarted. Without a program, new sessions use tmux's default shell. Session names are exact names, not pane/session IDs, prefixes, or wildcard selectors. Dots, colons, and control characters are not accepted.
+
+`start` requires Ghostty 1.3+ with AppleScript enabled and macOS Automation permission to control Ghostty. It creates a standalone window through Ghostty's API, without simulated typing. It does not rearrange windows or change Pi's editor display mode. The existing AeroSpace sizing applies only if the new controller already occupies a supported bottom-window layout.
+
+Detach the remote view with tmux's usual detach key (`Ctrl-B`, then `D` by default). Close the local controller with `Ctrl-D`. Either can stay open independently; detaching or closing a controller does not kill the remote session. If the controller fails to start, its window keeps the error visible until you press Enter. A window-creation failure leaves the remote session alone and prints a manual `attach` command. Check for an already-open controller before retrying after an Automation error or timeout. Each successful `start` invocation opens a new controller window, including when reusing a session.
+
+Only the local machine needs `tmux-remote-control` for this workflow. The remote machine needs SSH, tmux, a POSIX shell, and the program you choose to run.
+
+### Attach to an existing session (all supported local terminals)
+
+If the remote session is already visible in another terminal, run the controller directly:
+
+```bash
+tmux-remote-control attach devbox work
+```
+
+Omit `work` to select an existing remote session. This also avoids the clipboard and does not require Ghostty or macOS.
+
+### Copy a controller command from the remote tmux session (fallback)
 
 Run the basic command inside the remote tmux pane:
 
@@ -29,8 +67,6 @@ tmux-remote-control attach devbox work
 ```
 
 It also prints the command as a fallback.
-
-### 2. Attach the local controller
 
 Paste the copied command into a terminal on the local device:
 
@@ -56,19 +92,20 @@ Local device:
 - OpenSSH
 - Node.js 22.19 or newer for the inline prompt and editor submission handling
 - `fzf` is optional and provides fuzzy message-history search and the session selector when several sessions exist
+- `start` additionally requires macOS and Ghostty 1.3+ with AppleScript enabled and Automation permission
 
 Remote machine:
 
 - Bash
 - tmux
-- `tmux-remote-control` for generating the controller command
+- `tmux-remote-control` only for the remote clipboard launcher and Pi shortcut, not for local `start` or `attach`
 - SSH access from the local device
 
 Development and verification also require npm and Python 3.
 
 ## Install
 
-Install or link the same executable on both machines:
+Install or link the executable on the local machine. Install it on the remote machine too if you use the remote clipboard launcher or Pi shortcut:
 
 ```bash
 npm run verify
@@ -317,8 +354,8 @@ History uses the SSH alias and tmux session name as its scope. If either name ch
 
 ## Environment
 
-- `TMUX_REMOTE_CONTROL_HOST`: default SSH host for either mode
-- `TMUX_REMOTE_CONTROL_SESSION`: default attach-mode session selector
+- `TMUX_REMOTE_CONTROL_HOST`: default SSH host for all modes
+- `TMUX_REMOTE_CONTROL_SESSION`: default `start` session name or `attach` session selector
 - `TMUX_REMOTE_CONTROL_TARGET`: default attach-mode fixed pane target
 - `TMUX_REMOTE_CONTROL_EDITOR`: attach-mode editor command
 - `TMUX_REMOTE_CONTROL_TMPDIR`: local directory for prompt and discovery temporary files
@@ -330,6 +367,10 @@ History uses the SSH alias and tmux session name as its scope. If either name ch
 Command-line host, session, and target arguments override environment defaults.
 
 ## Connection behavior
+
+`start` uses `xterm-256color` for the remote view when the local terminal advertises `xterm-ghostty`, so the server does not need Ghostty-specific terminal definitions. Other configured terminal types are preserved.
+
+`start` establishes a private SSH control connection for session creation/discovery and the current terminal's remote attachment. It closes that connection and removes its temporary socket directory when the remote view detaches or exits. The new controller uses its own `attach` connection, so either terminal can close independently. SSH may ask for authentication again in the controller window if no suitable key or agent is available. `start` forwards the local `PATH`, SSH agent socket, editor/history/controller settings, and state/temporary directory settings to the new window; it does not copy the entire shell environment.
 
 Attach mode establishes an SSH control connection during discovery. Every submission reuses it, which avoids repeated SSH key exchange and authentication. The private control socket uses a short directory under `/tmp` to stay below Unix-socket path limits on macOS. The control socket and temporary files are removed when the controller exits.
 
