@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, readdirSync, statSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { controllerWindowArgs, openControllerWindow, GHOSTTY_WINDOW_SCRIPT, shellQuote } from "../bin/ghostty-window.mjs";
 
+// Window tests must never read or overwrite the user's saved controller IDs.
+const stateRoot = mkdtempSync(join(tmpdir(), "tmux-rc-window-state-"));
+after(() => rmSync(stateRoot, { recursive: true, force: true }));
 const options = { executable: "/a path/controller's executable", host: "dev'box", sessionId: "$42", cwd: "/project's directory",
-  env: { PATH: "/custom/bin", TMUX_REMOTE_CONTROL_EDITOR: "code --wait", SSH_AUTH_SOCK: "/private/agent.sock" } };
+  env: { XDG_STATE_HOME: stateRoot, PATH: "/custom/bin", TMUX_REMOTE_CONTROL_EDITOR: "code --wait", SSH_AUTH_SOCK: "/private/agent.sock" } };
 
 test("Ghostty window configuration uses static AppleScript with separate data arguments", async () => {
   const calls = [];
@@ -21,19 +24,67 @@ test("Ghostty window configuration uses static AppleScript with separate data ar
   const args = calls[0][1];
   assert.deepEqual(args.slice(0, 3), ["-e", GHOSTTY_WINDOW_SCRIPT, "--"]);
   assert.equal(args[4], options.cwd);
+  assert.equal(args[5], "");
   assert.match(args[3], /^\/bin\/bash --noprofile --norc -c '/);
   assert.doesNotMatch(args[3], /^shell:/);
   assert.ok(!GHOSTTY_WINDOW_SCRIPT.includes(options.host));
+  assert.match(GHOSTTY_WINDOW_SCRIPT, /if exists window id savedWindowId then return savedWindowId/);
+  assert.ok(GHOSTTY_WINDOW_SCRIPT.indexOf("return savedWindowId") < GHOSTTY_WINDOW_SCRIPT.indexOf("new window with configuration cfg"));
   assert.match(GHOSTTY_WINDOW_SCRIPT, /new window with configuration cfg/);
+  assert.match(GHOSTTY_WINDOW_SCRIPT, /environment variables of cfg to items 4 thru -1 of argv/);
   assert.match(GHOSTTY_WINDOW_SCRIPT, /wait after command of cfg to false/);
   assert.doesNotMatch(GHOSTTY_WINDOW_SCRIPT, /input text|send key|System Events/);
   assert.equal(calls[0][2].timeoutMs, 60_000);
 });
 
+test("repeated launches reuse a saved live window, but not closed windows or other destinations", async () => {
+  const env = { ...options.env, XDG_STATE_HOME: join(stateRoot, "reuse") };
+  const liveWindows = new Set();
+  const savedIds = [];
+  let created = 0;
+  // Model Ghostty's existence check without automating the desktop.
+  const run = async (_command, args) => {
+    const savedId = args[5];
+    savedIds.push(savedId);
+    if (liveWindows.has(savedId)) return { code: 0, stdout: `${savedId}\n` };
+    const id = `window-${++created}`;
+    liveWindows.add(id);
+    return { code: 0, stdout: `${id}\n` };
+  };
+  const open = (changes = {}) => openControllerWindow({ ...options, env, ...changes }, run);
+  assert.equal(await open(), "window-1");
+  assert.equal(await open(), "window-1", "retry after an SSH drop must keep the controller");
+  assert.equal(created, 1);
+  assert.equal(await open({ host: "other-host" }), "window-2");
+  assert.equal(await open({ sessionId: "$43" }), "window-3");
+  assert.equal(await open(), "window-1");
+  liveWindows.delete("window-1");
+  assert.equal(await open(), "window-4", "closed window IDs must not prevent a replacement");
+  assert.equal(await open(), "window-4", "the replacement must be remembered");
+  assert.deepEqual(savedIds, ["", "window-1", "", "", "window-1", "window-1", "window-4"]);
+  const directory = join(env.XDG_STATE_HOME, "tmux-remote-control", "windows");
+  assert.equal(statSync(directory).mode & 0o777, 0o700);
+  const files = readdirSync(directory);
+  assert.equal(files.length, 3);
+  for (const file of files) assert.equal(statSync(join(directory, file)).mode & 0o777, 0o600);
+});
+
+test("failure to save a window ID does not block attachment", async (t) => {
+  const file = join(stateRoot, "not-a-directory");
+  writeFileSync(file, "");
+  const warning = t.mock.method(console, "error", () => {});
+  const id = await openControllerWindow({ ...options, env: { XDG_STATE_HOME: file } }, async (_command, args) => {
+    assert.equal(args[5], "");
+    return { code: 0, stdout: "new-window\n" };
+  });
+  assert.equal(id, "new-window");
+  assert.match(warning.mock.calls[0].arguments[0], /next start may open another window/);
+});
+
 test("only controller settings and required local environment are forwarded", () => {
   const args = controllerWindowArgs({ ...options, env: { ...options.env, SECRET_TOKEN: "not-for-Ghostty",
     GHOSTTY_WINDOW_ID: "old", TMUX: "old socket", SSH_CONNECTION: "remote", TMUX_REMOTE_CONTROL_TARGET: "%99" } });
-  const values = args.slice(5);
+  const values = args.slice(6);
   assert.ok(values.includes("PATH=/custom/bin"));
   assert.ok(values.includes("SSH_AUTH_SOCK=/private/agent.sock"));
   assert.ok(values.includes("TMUX_REMOTE_CONTROL_EDITOR=code --wait"));

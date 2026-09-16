@@ -24,7 +24,7 @@ def run(root, mode="success", extra_env=None, interrupt=False):
            if not key.startswith("TMUX_REMOTE_CONTROL_")
            and key not in ("TMUX", "TMUX_PANE", "STY", "SSH_CONNECTION", "SSH_TTY")}
     env.update(PATH=f"{root}:{env['PATH']}", TERM="xterm-256color", TERM_PROGRAM="ghostty",
-               FIXTURE_LOG=str(log), FIXTURE_MODE=mode)
+               XDG_STATE_HOME=str(root / "state"), FIXTURE_LOG=str(log), FIXTURE_MODE=mode)
     env.update(extra_env or {})
     pid, fd = pty.fork()
     if pid == 0:
@@ -115,10 +115,19 @@ else:
     assert "argument with spaces" in calls[0][1][-1]
     assert calls[1][1][3].startswith("/bin/bash --noprofile --norc -c "), calls[1]
     assert "$42" in calls[1][1][3], calls[1]
+    assert calls[1][1][5] == "", calls[1]
     assert calls[2][1][-1] == "tmux attach-session -t '$42'"
     socket_arg = next(arg for arg in calls[0][1] if arg.startswith("ControlPath="))
     assert socket_arg in calls[2][1] and socket_arg in calls[3][1]
     assert not Path(socket_arg.removeprefix("ControlPath=")).parent.exists()
+
+    # A separate CLI invocation passes the saved window ID to Ghostty, while
+    # still attaching the remote view and cleaning up its own SSH connection.
+    status, output, calls = run(root, "reconnect")
+    assert status == 0, output
+    assert [call[0] for call in calls] == ["ssh", "osascript", "ssh", "ssh"], calls
+    assert calls[1][1][5] == "fixture-window-id", calls[1]
+    assert calls[2][1][-1] == "tmux attach-session -t '$42'"
 
     status, output, calls = run(root, "window-failure")
     assert status == 1, output

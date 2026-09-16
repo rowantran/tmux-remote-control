@@ -11,7 +11,8 @@ export const START_USAGE = `Usage:
   tmux-remote-control start --host HOST --session SESSION [-- COMMAND [ARG...]]
 
 Run locally in a macOS Ghostty terminal. Create or reuse the named remote tmux
-session, open a local controller window, then attach this terminal over SSH.
+session, open or reuse its local controller window, then attach this terminal
+over SSH. Repeating start reuses the controller if its window is still open.
 COMMAND runs only when creating a new session; otherwise it is ignored.
 Without COMMAND, a new session uses tmux's default shell.
 

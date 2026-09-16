@@ -12,8 +12,8 @@ Usage:
   tmux-remote-control attach HOST --list
 
 Run `tmux-remote-control start HOST SESSION` in a local macOS Ghostty terminal
-to create or reuse a remote session, open a controller window, and attach the
-current terminal to the remote session. COMMAND runs only for a new session.
+to create or reuse a remote session and its local controller window, and attach
+the current terminal to the remote session. COMMAND runs only for a new session.
 See `tmux-remote-control start --help` for details.
 
 Run `tmux-remote-control [HOST]` inside the remote tmux pane. It copies a local

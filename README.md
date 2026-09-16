@@ -14,11 +14,11 @@ Run one command in a **local Ghostty terminal**, outside tmux, screen, or SSH:
 tmux-remote-control start devbox work
 ```
 
-The command creates or reuses the exact remote tmux session named `work`, opens a new local Ghostty window for the controller, then attaches the current terminal to the remote session. No clipboard, manual paste, or background service is needed.
+The command creates or reuses the exact remote tmux session named `work`, opens or reuses its local Ghostty controller window, then attaches the current terminal to the remote session. After a network drop, repeat the same command: if the controller window is still open, no second window is created. No clipboard, manual paste, or background service is needed.
 
 ```text
 Current window → SSH → remote tmux session (output and direct interaction)
-New window     → local input → the same remote tmux session
+Controller     → local input → the same remote tmux session
 ```
 
 To start a program in a **new** session:
@@ -30,9 +30,11 @@ tmux-remote-control start devbox work -- isara pi run
 
 Arguments after `--` are passed to the program as literal arguments, not as a shell command string. If the session already exists, the program and its arguments are ignored: nothing is typed into the session and its application is not restarted. Without a program, new sessions use tmux's default shell. Session names are exact names, not pane/session IDs, prefixes, or wildcard selectors. Dots, colons, and control characters are not accepted.
 
-`start` requires Ghostty 1.3+ with AppleScript enabled and macOS Automation permission to control Ghostty. It creates a standalone window through Ghostty's API, without simulated typing. It does not rearrange windows or directly change Pi's editor display mode; the Pi extension can enable that mode from its configuration when Pi starts. The existing AeroSpace sizing applies only if the new controller already occupies a supported bottom-window layout.
+`start` requires Ghostty 1.3+ with AppleScript enabled and macOS Automation permission to control Ghostty. When no saved controller window is still open, it creates a standalone window through Ghostty's API, without simulated typing. It does not rearrange windows or directly change Pi's editor display mode; the Pi extension can enable that mode from its configuration when Pi starts. The existing AeroSpace sizing applies only if the new controller already occupies a supported bottom-window layout.
 
-Detach the remote view with tmux's usual detach key (`Ctrl-B`, then `D` by default). Close the local controller with `Ctrl-D`. Either can stay open independently; detaching or closing a controller does not kill the remote session. If the controller fails to start, its window keeps the error visible until you press Enter. A window-creation failure leaves the remote session alone and prints a manual `attach` command. Check for an already-open controller before retrying after an Automation error or timeout. Each successful `start` invocation opens a new controller window, including when reusing a session.
+Detach the remote view with tmux's usual detach key (`Ctrl-B`, then `D` by default). Close the local controller with `Ctrl-D`. Either can stay open independently; detaching or closing a controller does not kill the remote session. If the controller fails to start, its window keeps the error visible until you press Enter. A window-creation failure leaves the remote session alone and prints a manual `attach` command. Check for an already-open controller before retrying after an Automation error or timeout, since its window ID might not have been saved. If a controller has exited and is showing an error, close that window before running `start` again.
+
+`start` saves the Ghostty window ID for each SSH alias and resolved tmux session ID under `${XDG_STATE_HOME:-~/.local/state}/tmux-remote-control/windows/`. It checks that the window still exists before reusing it; closed windows are replaced automatically. Reuse leaves the controller and any draft unchanged. Controllers opened with `attach` or an older version are not tracked.
 
 Only the local machine needs `tmux-remote-control` for this workflow. The remote machine needs SSH, tmux, a POSIX shell, and the program you choose to run.
 

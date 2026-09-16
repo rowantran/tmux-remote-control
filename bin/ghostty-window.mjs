@@ -1,3 +1,7 @@
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { runProcess } from "./launch-process.mjs";
 
 export function shellQuote(value) {
@@ -10,10 +14,14 @@ export function shellQuote(value) {
 export const GHOSTTY_WINDOW_SCRIPT = `
 on run argv
   tell application "Ghostty"
+    set savedWindowId to item 3 of argv
+    if savedWindowId is not "" then
+      if exists window id savedWindowId then return savedWindowId
+    end if
     set cfg to new surface configuration
     set command of cfg to item 1 of argv
     set initial working directory of cfg to item 2 of argv
-    set environment variables of cfg to items 3 thru -1 of argv
+    set environment variables of cfg to items 4 thru -1 of argv
     set wait after command of cfg to false
     set win to new window with configuration cfg
     return id of win
@@ -28,7 +36,7 @@ const FORWARDED_ENV = [
   "TMUX_REMOTE_CONTROL_HISTORY_PICKER", "TMUX_REMOTE_CONTROL_AEROSPACE_RESIZE",
 ];
 
-export function controllerWindowArgs({ executable, host, sessionId, env = process.env, cwd = process.cwd() }) {
+export function controllerWindowArgs({ executable, host, sessionId, windowId = "", env = process.env, cwd = process.cwd() }) {
   if (!executable.startsWith("/") || !/^\$[0-9]+$/.test(sessionId) || !host || /^-|[\s\x00-\x1f\x7f]/u.test(host)) {
     throw new Error("invalid controller window destination");
   }
@@ -49,17 +57,35 @@ export function controllerWindowArgs({ executable, host, sessionId, env = proces
     "TMUX_REMOTE_CONTROL_HOST", "TMUX_REMOTE_CONTROL_SESSION", "TMUX_REMOTE_CONTROL_TARGET"]) {
     environment.push(`${key}=`);
   }
-  return ["-e", GHOSTTY_WINDOW_SCRIPT, "--", command, cwd, ...environment];
+  return ["-e", GHOSTTY_WINDOW_SCRIPT, "--", command, cwd, windowId, ...environment];
 }
 
 export async function openControllerWindow(options, run = runProcess) {
-  const args = controllerWindowArgs(options);
+  const env = options.env ?? process.env;
+  const directory = join(env.XDG_STATE_HOME || join(env.HOME || homedir(), ".local", "state"),
+    "tmux-remote-control", "windows");
+  // Match the SSH alias and resolved tmux ID, not a mutable window title or a
+  // session name that may have been reused for a different remote session.
+  const key = createHash("sha256").update(JSON.stringify([options.host, options.sessionId])).digest("hex");
+  const stateFile = join(directory, key);
+  let windowId = "";
+  try { windowId = readFileSync(stateFile, "utf8").trim(); }
+  catch { /* No saved window (or unreadable state): open one normally. */ }
+  const args = controllerWindowArgs({ ...options, windowId });
   try {
     // Allow time for the first macOS Automation permission prompt. Never retry:
     // a timeout can occur after a window was already created.
     const result = await run("osascript", args, { signal: options.signal, timeoutMs: 60_000 });
     if (result.code !== 0 || !result.stdout.trim()) throw new Error("window creation failed");
-    return result.stdout.trim();
+    windowId = result.stdout.trim();
+    try {
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+      writeFileSync(stateFile, `${windowId}\n`, { mode: 0o600 });
+    } catch {
+      // Saving a reuse hint must not prevent attachment after opening a window.
+      console.error("tmux-remote-control: could not save the controller window ID; the next start may open another window.");
+    }
+    return windowId;
   } catch (error) {
     if (options.signal?.aborted) throw error;
     throw new Error("Could not open the controller window. Use Ghostty 1.3+ with macos-applescript enabled and allow macOS Automation access to Ghostty. Check for an existing controller window before retrying.", { cause: error });
