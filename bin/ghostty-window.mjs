@@ -36,7 +36,12 @@ export function controllerWindowArgs({ executable, host, sessionId, env = proces
   // Close normally on Ctrl-D, but keep connection/startup errors visible until
   // acknowledged. A new terminal process is started directly; no keystrokes
   // are sent to an existing shell or application.
-  const command = `shell:${attach}; status=$?; if [ "$status" -ne 0 ]; then printf '\\nController exited (%s). Press Enter to close.\\n' "$status"; IFS= read -r reply; fi; exit "$status"`;
+  const controllerScript = `${attach}; status=$?; if [ "$status" -ne 0 ]; then printf '\\nController exited (%s). Press Enter to close.\\n' "$status"; IFS= read -r reply; fi; exit "$status"`;
+  // The embedded/AppleScript API already treats command as shell text. It
+  // does not parse the config file's shell: prefix. On macOS Ghostty prepends
+  // `exec -l`, so the compound script needs its own shell or the exit/error
+  // handling after attach is lost. Skip profiles to preserve the supplied env.
+  const command = `/bin/bash --noprofile --norc -c ${shellQuote(controllerScript)}`;
   const environment = FORWARDED_ENV.map((key) => `${key}=${env[key] ?? ""}`);
   // Do not inherit stale remote/nested-terminal context or target defaults
   // from the process that originally launched the Ghostty app.

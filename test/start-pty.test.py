@@ -113,7 +113,8 @@ else:
     assert calls[0][1][-2] == "dev'box"
     assert "new-session" in calls[0][1][-1]
     assert "argument with spaces" in calls[0][1][-1]
-    assert "'$42'" in calls[1][1][3], calls[1]
+    assert calls[1][1][3].startswith("/bin/bash --noprofile --norc -c "), calls[1]
+    assert "$42" in calls[1][1][3], calls[1]
     assert calls[2][1][-1] == "tmux attach-session -t '$42'"
     socket_arg = next(arg for arg in calls[0][1] if arg.startswith("ControlPath="))
     assert socket_arg in calls[2][1] and socket_arg in calls[3][1]

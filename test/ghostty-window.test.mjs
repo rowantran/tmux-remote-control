@@ -21,8 +21,8 @@ test("Ghostty window configuration uses static AppleScript with separate data ar
   const args = calls[0][1];
   assert.deepEqual(args.slice(0, 3), ["-e", GHOSTTY_WINDOW_SCRIPT, "--"]);
   assert.equal(args[4], options.cwd);
-  assert.match(args[3], /^shell:/);
-  assert.ok(args[3].includes("'--host' 'dev'\\''box' '--session' '$42'"));
+  assert.match(args[3], /^\/bin\/bash --noprofile --norc -c '/);
+  assert.doesNotMatch(args[3], /^shell:/);
   assert.ok(!GHOSTTY_WINDOW_SCRIPT.includes(options.host));
   assert.match(GHOSTTY_WINDOW_SCRIPT, /new window with configuration cfg/);
   assert.match(GHOSTTY_WINDOW_SCRIPT, /wait after command of cfg to false/);
@@ -71,7 +71,7 @@ test("invalid window destinations are rejected without invoking osascript", asyn
   }
 });
 
-test("the controller command preserves paths and host arguments without shell injection", () => {
+test("the complete AppleScript command survives Ghostty's exec wrapper and preserves literal argv", () => {
   const root = mkdtempSync(join(tmpdir(), "tmux-rc-ghostty-test-"));
   const executable = join(root, "controller's \"name\"; false");
   const log = join(root, "argv.json");
@@ -81,7 +81,10 @@ test("the controller command preserves paths and host arguments without shell in
     const host = "dev'box;false";
     const args = controllerWindowArgs({ ...options, executable, host });
     for (const code of [0, 7]) {
-      const result = spawnSync("/bin/sh", ["-c", args[3].slice("shell:".length)], {
+      // Match the macOS launcher shown in Ghostty's failure report. Do not
+      // strip prefixes or otherwise pre-process the actual API command.
+      // Ghostty execs it, so error handling must live in its own child shell.
+      const result = spawnSync("/bin/bash", ["--noprofile", "--norc", "-c", `exec -l ${args[3]}`], {
         env: { ...process.env, ARGV_LOG: log, FIXTURE_EXIT: String(code) }, encoding: "utf8", input: "\n", timeout: 5000,
       });
       assert.equal(result.status, code, result.stderr);
