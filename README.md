@@ -30,7 +30,7 @@ tmux-remote-control start devbox work -- isara pi run
 
 Arguments after `--` are passed to the program as literal arguments, not as a shell command string. If the session already exists, the program and its arguments are ignored: nothing is typed into the session and its application is not restarted. Without a program, new sessions use tmux's default shell. Session names are exact names, not pane/session IDs, prefixes, or wildcard selectors. Dots, colons, and control characters are not accepted.
 
-`start` requires Ghostty 1.3+ with AppleScript enabled and macOS Automation permission to control Ghostty. It creates a standalone window through Ghostty's API, without simulated typing. It does not rearrange windows or change Pi's editor display mode. The existing AeroSpace sizing applies only if the new controller already occupies a supported bottom-window layout.
+`start` requires Ghostty 1.3+ with AppleScript enabled and macOS Automation permission to control Ghostty. It creates a standalone window through Ghostty's API, without simulated typing. It does not rearrange windows or directly change Pi's editor display mode; the Pi extension can enable that mode from its configuration when Pi starts. The existing AeroSpace sizing applies only if the new controller already occupies a supported bottom-window layout.
 
 Detach the remote view with tmux's usual detach key (`Ctrl-B`, then `D` by default). Close the local controller with `Ctrl-D`. Either can stay open independently; detaching or closing a controller does not kill the remote session. If the controller fails to start, its window keeps the error visible until you press Enter. A window-creation failure leaves the remote session alone and prints a manual `attach` command. Check for an already-open controller before retrying after an Automation error or timeout. Each successful `start` invocation opens a new controller window, including when reusing a session.
 
@@ -123,7 +123,7 @@ Copy the included Pi extension into the global extension directory, then reload 
 ./install-pi-extension.sh
 ```
 
-Run the installer again after updating this repository. It replaces the installed copy, including an older symlink installation, and removes the obsolete directory-based RPC extension entry if present.
+Run the installer again after updating this repository. It replaces the installed copy and its configuration loader, including an older symlink installation, and removes the obsolete directory-based RPC extension entry if present.
 
 Run `/reload` in an existing Pi process, or start a new one. Inside a remote tmux session, press `Ctrl+Shift+R`. The extension:
 
@@ -150,7 +150,19 @@ Multiline input keeps Pi's normal wrapping, scrolling, and cursor. Autocomplete 
 
 Both direct typing and tmux paste-and-Enter submissions continue to use Pi's normal input path. Any text entered directly in the remote pane stays visible.
 
-Paste the copied command into a local terminal. Press `Ctrl+Shift+R` again, or run `/remote-control`, to restore Pi's normal editor. The local controller stays open and works after either mode change. Because the extension does not open the tmux socket, it also works when Pi runs in a sandbox that forwards `TMUX_PANE` but blocks local Unix sockets, such as `isara pi run`.
+To start each interactive Pi session in remote-control mode, add this setting on the remote machine at `$XDG_CONFIG_HOME/tmux-remote-control/config.json`, or at `~/.config/tmux-remote-control/config.json` when `XDG_CONFIG_HOME` is not set:
+
+```json
+{
+  "pi": {
+    "autoEnable": true
+  }
+}
+```
+
+The extension reads the file when each Pi session starts, including after `/new`, `/resume`, `/fork`, and `/reload`. Automatic activation only changes Pi's editor display; it does not copy a command because `tmux-remote-control start` has already opened the local controller. It requires a valid `TMUX_PANE`, so Pi processes outside tmux are unchanged. A missing file or any value other than JSON `true` keeps automatic activation off. A malformed file produces a Pi warning and leaves manual activation available.
+
+Without automatic activation, paste the copied command into a local terminal after pressing `Ctrl+Shift+R`. While remote-control mode is active, press `Ctrl+Shift+R` or run `/remote-control` to restore Pi's normal editor. Use the same action again to re-enable remote-control mode and recopy the local controller command. The local controller stays open and works after either mode change. Because the extension does not open the tmux socket, it also works when Pi runs in a sandbox that forwards `TMUX_PANE` but blocks local Unix sockets, such as `isara pi run`.
 
 Pi selectors and dialogs, such as `/tree` and extension questionnaires, temporarily take keyboard focus instead of the editor. Do not submit a local controller message while one is open. Interact with it in the remote tmux pane. When it closes, focus returns to the editor. You can then continue from the same local controller or press `Ctrl+Shift+R` to restore the normal editor.
 

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { stripTypeScriptTypes } from "node:module";
 import { setImmediate } from "node:timers/promises";
 import test from "node:test";
@@ -9,17 +11,19 @@ import { CURSOR_MARKER, Editor, stripTerminalSequences, visibleWidth } from "@ea
 // Use the real pi-tui Editor for geometry, editing, paste, and submission tests
 // without requiring the optional pi-coding-agent peer or an API key.
 const tuiUrl = import.meta.resolve("@earendil-works/pi-tui");
+const configUrl = new URL("../tmux-remote-control/config.mjs", import.meta.url).href;
 const source = stripTypeScriptTypes(readFileSync(new URL("../pi-extension.ts", import.meta.url), "utf8"), { mode: "transform" })
   .replace(/import .* from "@earendil-works\/pi-coding-agent";/, `import { Editor as CustomEditor } from ${JSON.stringify(tuiUrl)};`)
-  .replaceAll('from "@earendil-works/pi-tui"', `from ${JSON.stringify(tuiUrl)}`);
+  .replaceAll('from "@earendil-works/pi-tui"', `from ${JSON.stringify(tuiUrl)}`)
+  .replaceAll('from "./tmux-remote-control/config.mjs"', `from ${JSON.stringify(configUrl)}`);
 const { default: extension } = await import(`data:text/javascript,${encodeURIComponent(source)}`);
 const label = "📡 ── text entered ";
 const accent = text => `\x1b[36m${text}\x1b[39m`;
 const warning = text => `\x1b[33m${text}\x1b[39m`;
 const plain = lines => lines.map(stripTerminalSequences);
 
-async function setup(initialText = "") {
-  let toggle;
+async function setup(initialText = "", { activate = true } = {}) {
+  let toggle, sessionStart, execCalls = 0;
   const tui = { terminal: { rows: 24 }, requestRender() {} };
   const identity = text => text;
   const theme = {
@@ -47,9 +51,11 @@ async function setup(initialText = "") {
   };
   ui.editor.setText(initialText);
   const pi = {
+    on: (event, handler) => { if (event === "session_start") sessionStart = handler; },
     registerShortcut: (_key, spec) => { toggle = spec.handler; },
     registerCommand() {},
     async exec(command, args) {
+      execCalls++;
       assert.equal(command, "tmux-remote-control");
       assert.deepEqual(args, ["--print-controller-command"]);
       return { code: 0, stdout: "tmux-remote-control attach host --session %1", stderr: "" };
@@ -57,19 +63,30 @@ async function setup(initialText = "") {
   };
   extension(pi);
   const ctx = { mode: "tui", ui };
-  const stdoutWrite = process.stdout.write;
-  try {
-    process.stdout.write = chunk => { clipboard.push(chunk); return true; };
-    await toggle(ctx);
-  } finally {
-    process.stdout.write = stdoutWrite;
+  const invoke = async handler => {
+    const stdoutWrite = process.stdout.write;
+    try {
+      process.stdout.write = chunk => { clipboard.push(chunk); return true; };
+      await handler();
+    } finally {
+      process.stdout.write = stdoutWrite;
+    }
+  };
+  if (activate) {
+    await invoke(() => toggle(ctx));
+    assert.equal(clipboard.length, 1);
+    assert.match(notices[0][0], /Copied the local controller command/);
   }
-  assert.equal(clipboard.length, 1);
-  assert.match(notices[0][0], /Copied the local controller command/);
   const baseline = originalFactory();
   baseline.focused = true;
   baseline.borderColor = warning;
-  return { ui, editor: ui.editor, baseline, originalFactory, disable: () => toggle(ctx) };
+  return {
+    ui, get editor() { return ui.editor; }, baseline, originalFactory, notices, clipboard,
+    execCalls: () => execCalls,
+    toggle: () => invoke(() => toggle(ctx)),
+    disable: () => invoke(() => toggle(ctx)),
+    start: () => invoke(() => sessionStart({ reason: "startup" }, ctx)),
+  };
 }
 
 function assertCollapsed(editor, width = 80) {
@@ -279,4 +296,39 @@ test("toggling remote mode preserves existing and newly entered drafts", async (
   ui.editor.setText("");
   assert.equal(ui.editor.render(80).length, 3);
   assert.ok(!ui.editor.render(80).join("").includes("📡"));
+});
+
+test("configured tmux sessions auto-enable without copying, then toggle off and on with a fresh copy", async () => {
+  const root = mkdtempSync(join(tmpdir(), "tmux-rc-pi-config-"));
+  const configDirectory = join(root, "tmux-remote-control");
+  const previousConfigHome = process.env.XDG_CONFIG_HOME;
+  const previousPane = process.env.TMUX_PANE;
+  try {
+    mkdirSync(configDirectory);
+    writeFileSync(join(configDirectory, "config.json"), JSON.stringify({ pi: { autoEnable: true } }));
+    process.env.XDG_CONFIG_HOME = root;
+    process.env.TMUX_PANE = "%42";
+
+    const state = await setup("", { activate: false });
+    await state.start();
+    assertCollapsed(state.editor);
+    assert.equal(state.execCalls(), 0, "auto-enable must not generate a redundant controller command");
+    assert.deepEqual(state.clipboard, []);
+
+    await state.toggle();
+    assert.equal(state.ui.factory, state.originalFactory);
+    assert.match(state.notices.at(-1)[0], /Remote input disabled/);
+
+    await state.toggle();
+    assertCollapsed(state.editor);
+    assert.equal(state.execCalls(), 1);
+    assert.equal(state.clipboard.length, 1);
+    assert.match(state.notices.at(-1)[0], /Copied the local controller command/);
+  } finally {
+    if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = previousConfigHome;
+    if (previousPane === undefined) delete process.env.TMUX_PANE;
+    else process.env.TMUX_PANE = previousPane;
+    rmSync(root, { recursive: true, force: true });
+  }
 });

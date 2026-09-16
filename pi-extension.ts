@@ -1,5 +1,6 @@
 import { CustomEditor, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { CURSOR_MARKER, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { loadConfig, piAutoEnable } from "./tmux-remote-control/config.mjs";
 
 const SHORTCUT = "ctrl+shift+r";
 type CustomEditorArguments = ConstructorParameters<typeof CustomEditor>;
@@ -59,31 +60,34 @@ export default function tmuxRemoteControl(pi: ExtensionAPI): void {
 		ctx.ui.notify("Remote input disabled. The local controller can stay open.", "info");
 	}
 
-	async function enable(ctx: ExtensionContext): Promise<void> {
+	async function enable(ctx: ExtensionContext, { copyControllerCommand = true } = {}): Promise<void> {
 		if (ctx.mode !== "tui") {
 			ctx.ui.notify("Remote input requires Pi's interactive TUI mode.", "error");
 			return;
 		}
 
-		const result = await pi.exec("tmux-remote-control", ["--print-controller-command"], { timeout: 5_000 });
-		if (result.code !== 0) {
-			const detail = result.stderr.trim() || result.stdout.trim() || `exit code ${result.code}`;
-			ctx.ui.notify(`Could not start remote input: ${detail}`, "error");
-			return;
-		}
+		let controllerCommand: string | undefined;
+		if (copyControllerCommand) {
+			const result = await pi.exec("tmux-remote-control", ["--print-controller-command"], { timeout: 5_000 });
+			if (result.code !== 0) {
+				const detail = result.stderr.trim() || result.stdout.trim() || `exit code ${result.code}`;
+				ctx.ui.notify(`Could not start remote input: ${detail}`, "error");
+				return;
+			}
 
-		const controllerCommand = result.stdout.trim();
-		if (!controllerCommand || /[\x00-\x1f\x7f]/.test(controllerCommand)) {
-			ctx.ui.notify("Could not start remote input: launcher returned an invalid controller command", "error");
-			return;
-		}
+			controllerCommand = result.stdout.trim();
+			if (!controllerCommand || /[\x00-\x1f\x7f]/.test(controllerCommand)) {
+				ctx.ui.notify("Could not start remote input: launcher returned an invalid controller command", "error");
+				return;
+			}
 
-		// Raw OSC 52 output is handled by tmux when set-clipboard is on. This
-		// copies through the pane without giving the sandbox access to tmux's
-		// Unix socket. Pi's own notification extension uses the same direct
-		// terminal-output pattern for non-rendering OSC sequences.
-		const encodedCommand = Buffer.from(controllerCommand, "utf8").toString("base64");
-		process.stdout.write(`\x1b]52;c;${encodedCommand}\x07`);
+			// Raw OSC 52 output is handled by tmux when set-clipboard is on. This
+			// copies through the pane without giving the sandbox access to tmux's
+			// Unix socket. Pi's own notification extension uses the same direct
+			// terminal-output pattern for non-rendering OSC sequences.
+			const encodedCommand = Buffer.from(controllerCommand, "utf8").toString("base64");
+			process.stdout.write(`\x1b]52;c;${encodedCommand}\x07`);
+		}
 
 		previousEditor = ctx.ui.getEditorComponent();
 		ctx.ui.setEditorComponent(
@@ -97,7 +101,7 @@ export default function tmuxRemoteControl(pi: ExtensionAPI): void {
 		);
 		active = true;
 
-		ctx.ui.notify(`Copied the local controller command:\n${controllerCommand}`, "info");
+		if (controllerCommand) ctx.ui.notify(`Copied the local controller command:\n${controllerCommand}`, "info");
 	}
 
 	async function toggle(ctx: ExtensionContext): Promise<void> {
@@ -110,6 +114,19 @@ export default function tmuxRemoteControl(pi: ExtensionAPI): void {
 			changing = false;
 		}
 	}
+
+	pi.on("session_start", async (_event, ctx) => {
+		if (ctx.mode !== "tui" || !/^%[0-9]+$/.test(process.env.TMUX_PANE ?? "")) return;
+		let autoEnable: boolean;
+		try {
+			autoEnable = piAutoEnable(loadConfig());
+		} catch (error) {
+			const detail = error instanceof Error ? error.message : String(error);
+			ctx.ui.notify(`Could not load tmux-remote-control configuration: ${detail}`, "warning");
+			return;
+		}
+		if (autoEnable) await enable(ctx, { copyControllerCommand: false });
+	});
 
 	pi.registerShortcut(SHORTCUT, {
 		description: "Toggle tmux remote input and copy the local controller command",

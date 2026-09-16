@@ -100,6 +100,7 @@ HOME="$install_home" "$installer" >"$root/installer-output"
 [[ ! -e "$install_dir/tmux-remote-control/index.ts" ]]
 [[ -f "$install_dir/tmux-remote-control/lib/keep.txt" ]]
 cmp "$project_root/pi-extension.ts" "$install_dir/tmux-remote-control.ts"
+cmp "$project_root/tmux-remote-control/config.mjs" "$install_dir/tmux-remote-control/config.mjs"
 [[ "$(cat "$old_target")" == "old target" ]]
 grep -F "Installed Pi extension at $install_dir/tmux-remote-control.ts" "$root/installer-output" >/dev/null
 
@@ -134,6 +135,9 @@ TMUX_PANE=%42 PATH="$root/no-tmux-bin:$PATH" \
 # line result with OSC 52 instead of invoking tmux inside the sandbox.
 grep -F '["--print-controller-command"]' "$project_root/pi-extension.ts" >/dev/null
 grep -F 'process.stdout.write(`\x1b]52;c;${encodedCommand}\x07`)' \
+  "$project_root/pi-extension.ts" >/dev/null
+grep -F 'pi.on("session_start"' "$project_root/pi-extension.ts" >/dev/null
+grep -F 'await enable(ctx, { copyControllerCommand: false })' \
   "$project_root/pi-extension.ts" >/dev/null
 
 # Editor fixtures must explicitly confirm the returned draft in a terminal.
