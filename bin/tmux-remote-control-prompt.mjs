@@ -128,6 +128,11 @@ const actions = [
   [Key.ctrl("l"), "pane-up"],
   [Key.ctrl("p"), "window-previous"],
   [Key.ctrl("n"), "window-next"],
+  [Key.ctrl("["), "copy-mode"],
+  [Key.ctrl("v"), "split-vertical"],
+  [Key.ctrl("z"), "split-horizontal"],
+  [Key.pageUp, "page-up"],
+  [Key.pageDown, "page-down"],
   ...Array.from({ length: 10 }, (_, index) => [Key.ctrl(String(index)), `window-${index}`]),
 ];
 
@@ -155,11 +160,10 @@ tui.addInputListener((data) => {
     finish("exit");
     return { consume: true };
   }
-  if (matchesKey(data, Key.ctrl("z"))) {
-    finish("suspend");
-    return { consume: true };
-  }
   for (const [key, action] of actions) {
+    // In legacy terminals Ctrl-[ and Esc are the same byte. Keep Esc's
+    // existing history/editor behavior; only forward an unambiguous Ctrl-[.
+    if (action === "copy-mode" && data === "\x1b") continue;
     if (matchesKey(data, key)) {
       if (navigation && action !== "editor") navigation.send(action);
       else if (action !== "editor" && controlPath && !navigationSessionId) bell();

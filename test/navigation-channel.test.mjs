@@ -54,6 +54,13 @@ test("maps every controller action to a quoted tmux command", () => {
   assert.equal(navigationCommand("$3", "window-previous"), "tmux select-window -t '$3' -p");
   assert.equal(navigationCommand("$3", "window-next"), "tmux select-window -t '$3' -n");
   assert.equal(navigationCommand("$3", "window-7"), "tmux select-window -t '$3:7'");
+  const client = `client=$(tmux list-clients -t '$3' -F '#{client_tty}' | head -n 1) && test -n "$client" && tmux send-keys -K -c "$client"`;
+  assert.equal(navigationCommand("$3", "copy-mode"), `${client} "$(tmux show-options -v -t '$3' prefix)" 'C-['`);
+  assert.equal(navigationCommand("$3", "split-vertical"), `${client} "$(tmux show-options -v -t '$3' prefix)" 'C-v'`);
+  assert.equal(navigationCommand("$3", "split-horizontal"), `${client} "$(tmux show-options -v -t '$3' prefix)" 'C-z'`);
+  assert.equal(navigationCommand("$3", "page-up"), `${client} 'PageUp'`);
+  assert.equal(navigationCommand("$3", "page-down"), `${client} 'PageDown'`);
+  assert.equal(navigationCommand("it's", "copy-mode").includes("-t 'it'\\''s'"), true);
   assert.equal(navigationCommand("it's", "window-next"), "tmux select-window -t 'it'\\''s' -n");
   assert.equal(navigationCommand("$3", "editor"), undefined);
   assert.equal(navigationCommand("$3", "window-10"), undefined);
@@ -81,8 +88,12 @@ test("writes commands only after the remote shell is ready, then in order", asyn
   assert.deepEqual(commands(child), ["tmux select-window -t '$3' -n", "tmux select-pane -t '$3' -L"]);
   assert.match(child.written, new RegExp(`; echo "${STATUS_MARKER} \\$\\?"\\n$`));
   nav.send("window-2");
+  nav.send("copy-mode");
+  nav.send("page-up");
   await tick();
-  assert.equal(commands(child).at(-1), "tmux select-window -t '$3:2'");
+  assert.equal(commands(child).at(-3), "tmux select-window -t '$3:2'");
+  assert.equal(commands(child).at(-2), navigationCommand("$3", "copy-mode"));
+  assert.equal(commands(child).at(-1), navigationCommand("$3", "page-up"));
   assert.equal(ssh.children.length, 1, "one channel serves every key");
 });
 

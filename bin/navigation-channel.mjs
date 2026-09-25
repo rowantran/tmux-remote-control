@@ -10,6 +10,11 @@ const shellQuote = (text) => `'${text.replaceAll("'", "'\\''")}'`;
 /** Map a controller key action to a remote tmux command for one session. */
 export function navigationCommand(sessionId, action) {
   const session = shellQuote(sessionId);
+  // -K sends through an attached client's key table (including copy mode),
+  // rather than typing into the pane. Resolve the client at keypress time.
+  const client = `client=$(tmux list-clients -t ${session} -F '#{client_tty}' | head -n 1) && test -n "$client"`;
+  const keys = (key, prefixed = false) =>
+    `${client} && tmux send-keys -K -c "$client" ${prefixed ? `"$(tmux show-options -v -t ${session} prefix)" ` : ""}${shellQuote(key)}`;
   switch (action) {
     case "pane-zoom": return `tmux resize-pane -Z -t ${session}`;
     case "pane-down": return `tmux select-pane -t ${session} -D`;
@@ -18,6 +23,11 @@ export function navigationCommand(sessionId, action) {
     case "pane-up": return `tmux select-pane -t ${session} -U`;
     case "window-previous": return `tmux select-window -t ${session} -p`;
     case "window-next": return `tmux select-window -t ${session} -n`;
+    case "copy-mode": return keys("C-[", true);
+    case "split-vertical": return keys("C-v", true);
+    case "split-horizontal": return keys("C-z", true);
+    case "page-up": return keys("PageUp");
+    case "page-down": return keys("PageDown");
     default: {
       const match = /^window-([0-9])$/.exec(action);
       return match ? `tmux select-window -t ${shellQuote(`${sessionId}:${match[1]}`)}` : undefined;

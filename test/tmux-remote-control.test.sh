@@ -51,6 +51,9 @@ if [[ "$command" == "tmux resize-pane "* || "$command" == "tmux select-pane "* |
   printf '%s\n' "$command" >>"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
   exit 0
 fi
+if [[ "$command" == "sh -c "* && "$command" == *'client=$('* ]]; then
+  PATH="$TMUX_REMOTE_CONTROL_TEST_FAKE_TMUX_DIR:$PATH" exec /bin/sh -c "$command"
+fi
 printf '%s\n' "$command" >"$TMUX_REMOTE_CONTROL_TEST_COMMAND"
 cat >"$TMUX_REMOTE_CONTROL_TEST_INPUT"
 if [[ -f "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS" ]]; then
@@ -62,6 +65,10 @@ chmod +x "$root/bin/ssh"
 mkdir -p "$root/fake-tmux"
 cat >"$root/fake-tmux/tmux" <<'SH'
 #!/bin/sh
+case "$1" in
+  list-clients) printf '/dev/pts/fake\n'; exit ;;
+  show-options) printf 'C-a\n'; exit ;;
+esac
 printf 'channel: tmux %s\n' "$*" >>"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
 SH
 chmod +x "$root/fake-tmux/tmux"
@@ -430,6 +437,31 @@ PY
 } >"$root/expected-navigation-commands"
 diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
 
+# Prefix bindings and page keys use the same channel and preserve the draft.
+# CSI-u distinguishes Ctrl-[ from Esc; legacy Esc must still open history.
+: >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+while IFS= read -r navigation_key; do
+  run_in_pty "6b6565702074686973206472616674${navigation_key}0d"
+  [[ "$(cat "$root/input")" == "keep this draft" ]]
+done < <(python3 - <<'PY'
+keys = [b"\x1b[91;5u", b"\x1b[118;5u", b"\x1b[122;5u", b"\x1b[5~", b"\x1b[6~"]
+for key in keys:
+    print(key.hex())
+PY
+)
+{
+  printf 'channel: tmux send-keys -K -c /dev/pts/fake %s\nsubmit\n' \
+    'C-a C-[' 'C-a C-v' 'C-a C-z' 'PageUp' 'PageDown'
+} >"$root/expected-navigation-commands"
+diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+
+# If the persistent channel is unavailable, the same key goes through SSH.
+: >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+TMUX_REMOTE_CONTROL_TEST_CHANNEL_FAIL=1 run_in_pty "6b65657020746869732064726166741b5b39313b35750d"
+[[ "$(cat "$root/input")" == "keep this draft" ]]
+printf 'channel: tmux send-keys -K -c /dev/pts/fake C-a C-[\nsubmit\n' >"$root/expected-navigation-commands"
+diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+
 # Kitty key releases match the same shortcut. They must not navigate again.
 # Ctrl-N press, release, press, release, then text and Enter:
 : >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
@@ -493,6 +525,8 @@ PY
 }
 
 if command -v tmux >/dev/null 2>&1 && can_connect_local_unix_socket 2>/dev/null; then
+  # A local Ghostty TERM may not have a terminfo entry for the real tmux probe.
+  export TERM=xterm-256color
   cat >"$root/bin/ssh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
