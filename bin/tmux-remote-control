@@ -55,14 +55,11 @@ At the inline prompt:
   Alt-Backspace        Delete the previous word
   Alt-Delete / Alt-D   Delete the next word
   Ctrl-G              Edit the current draft externally, then return without submitting
-  Ctrl-F              Toggle zoom for the focused remote pane
-  Ctrl-H/J/K/L        Select the remote pane down/left/right/up
-  Ctrl-P / Ctrl-N     Select the previous/next remote window
-  Ctrl-0 ... Ctrl-9   Select a remote window by index
-  Ctrl-[              Enter scrollback controls if prefix Ctrl-[ opens tmux copy mode
+  Ctrl-A              Send the remote tmux prefix; the next key goes to tmux
+  Esc after Ctrl-A    Cancel the prefix locally and remotely
+  Ctrl-A, [           Enter tmux copy mode (scrollback)
   q / Ctrl-U / Ctrl-D  In scrollback: quit / half-page up / half-page down
-  Ctrl-V / Ctrl-Z     Send the remote tmux prefix, then Ctrl-V / Ctrl-Z
-  PageUp / PageDown   Send the key to the remote tmux client immediately
+  PageUp / PageDown   In scrollback: page up / page down
   Ctrl-C              Clear the current draft
   Ctrl-D              Exit outside scrollback controls
 EOF
@@ -449,42 +446,39 @@ run_navigation_action() {
   fi
 
   case "$key_action" in
-    pane-zoom) navigation_command="tmux resize-pane -Z -t $(shell_quote "$session_id")" ;;
-    pane-down) navigation_command="tmux select-pane -t $(shell_quote "$session_id") -D" ;;
-    pane-left) navigation_command="tmux select-pane -t $(shell_quote "$session_id") -L" ;;
-    pane-right) navigation_command="tmux select-pane -t $(shell_quote "$session_id") -R" ;;
-    pane-up) navigation_command="tmux select-pane -t $(shell_quote "$session_id") -U" ;;
-    window-previous) navigation_command="tmux select-window -t $(shell_quote "$session_id") -p" ;;
-    window-next) navigation_command="tmux select-window -t $(shell_quote "$session_id") -n" ;;
-    copy-mode|copy-quit|copy-up|copy-down|split-vertical|split-horizontal|page-up|page-down)
-      local key="" prefix="" client_command="" mode_check=""
-      case "$key_action" in
-        copy-mode) key='C-['; prefix=true ;;
-        copy-quit) key='q' ;;
-        copy-up) key='C-u' ;;
-        copy-down) key='C-d' ;;
-        split-vertical) key='C-v'; prefix=true ;;
-        split-horizontal) key='C-z'; prefix=true ;;
-        page-up) key='PageUp' ;;
-        page-down) key='PageDown' ;;
-      esac
+    prefix-start|prefix-cancel|prefix-key:*|copy-*)
+      local key="" client_command="" mode_check="" prefix_check=""
+      client_command="client=\$(tmux list-clients -t $(shell_quote "$session_id") -F '#{client_tty}' | head -n 1) && test -n \"\$client\""
+      prefix_check="test \"\$(tmux display-message -p -c \"\$client\" '#{client_key_table}')\" = prefix"
       mode_check="test \"\$(tmux display-message -p -t $(shell_quote "$session_id") '#{pane_mode}')\" = copy-mode"
-      client_command="client=\$(tmux list-clients -t $(shell_quote "$session_id") -F '#{client_tty}' | head -n 1) && test -n \"\$client\" && tmux send-keys -K -c \"\$client\""
-      if [[ -n "$prefix" ]]; then
-        client_command="$client_command \"\$(tmux show-options -v -t $(shell_quote "$session_id") prefix)\""
-      fi
-      navigation_command="$client_command $(shell_quote "$key")"
-      if [[ "$key_action" == copy-mode ]]; then
-        navigation_command="$navigation_command && $mode_check"
-      elif [[ "$key_action" == copy-* ]]; then
-        navigation_command="$mode_check && $navigation_command"
-      fi
+      case "$key_action" in
+        prefix-start) navigation_command="$client_command && tmux send-keys -K -c \"\$client\" 'C-a' && $prefix_check" ;;
+        prefix-cancel) navigation_command="$client_command && tmux switch-client -c \"\$client\" -T root" ;;
+        prefix-key:*)
+          key="${key_action#prefix-key:}"
+          [[ -n "$key" ]] || die 'internal error: empty prefix key'
+          navigation_command="$client_command && $prefix_check && tmux send-keys -K -c \"\$client\" $(shell_quote "$key")"
+          if [[ "$key" == '[' ]]; then
+            local status_suffix='#{?#{==:#{pane_mode},copy-mode}, [scrollback],}'
+            local status_command="current=\$(tmux show-options -v -t $(shell_quote "$session_id") status-right) && case \"\$current\" in *$(shell_quote "$status_suffix")*) : ;; *) tmux set-option -t $(shell_quote "$session_id") status-right \"\$current$status_suffix\" ;; esac"
+            navigation_command="$navigation_command && $mode_check && ($status_command || :)"
+          fi
+          ;;
+        copy-*)
+          case "$key_action" in
+            copy-quit) key=q ;;
+            copy-up) key=C-u ;;
+            copy-down) key=C-d ;;
+            copy-page-up) key=PageUp ;;
+            copy-page-down) key=PageDown ;;
+            *) die "internal error: unknown key action $key_action" ;;
+          esac
+          navigation_command="$mode_check && $client_command && tmux send-keys -K -c \"\$client\" $(shell_quote "$key")"
+          ;;
+      esac
       # SSH asks the login shell to parse its command; use POSIX sh for
       # substitutions and assignments, including on Fish/Nushell accounts.
       navigation_command="sh -c $(shell_quote "$navigation_command")"
-      ;;
-    window-[0-9])
-      navigation_command="tmux select-window -t $(shell_quote "$session_id:${key_action#window-}")"
       ;;
     *)
       die "internal error: unknown key action $key_action"
@@ -494,8 +488,8 @@ run_navigation_action() {
   if ! ssh "${ssh_args[@]}" -T "$host" "$navigation_command" </dev/null; then
     # The helper stopped before interactive SSH. Keep its saved key mode in
     # sync if the fallback could not enter (or remain in) copy mode.
-    if [[ "$key_action" == copy-* && -n "$prompt_state_file" ]]; then
-      node -e 'const fs = require("node:fs"); const file = process.argv[1]; const state = JSON.parse(fs.readFileSync(file, "utf8")); state.scrollback = false; fs.writeFileSync(file, JSON.stringify(state));' "$prompt_state_file" || true
+    if [[ "$key_action" == copy-* || "$key_action" == prefix-* ]]; then
+      node -e 'const fs = require("node:fs"); const file = process.argv[1]; const action = process.argv[2]; const state = JSON.parse(fs.readFileSync(file, "utf8")); if (action.startsWith("prefix-")) state.prefix = false; if (action === "prefix-key:[" || action.startsWith("copy-")) state.scrollback = false; fs.writeFileSync(file, JSON.stringify(state));' "$prompt_state_file" "$key_action" || true
     fi
     printf 'tmux-remote-control: remote navigation failed\n' >&2
   fi
@@ -512,19 +506,19 @@ while :; do
   while :; do
     resize_local_window compact
     : >"$prompt_action_file"
-    # The prompt sends navigation keys itself over a persistent channel that
-    # shares this SSH control connection. It returns only other actions.
+    # The prompt sends remote keys over a persistent channel that shares this
+    # SSH control connection. It returns only other actions.
     node "$prompt_helper" "$prompt_file" "$prompt_action_file" "$host" "$controller_target" "$session_name" "$prompt_state_file" "$control_path" "$session_id" </dev/tty >/dev/tty || \
       die "inline prompt exited unsuccessfully"
     printf '\r\033[2K' >/dev/tty
-    # Earlier lines are navigation keys that the prompt could not send, for
+    # Earlier lines are remote keys that the prompt could not send, for
     # example when SSH needs interactive authentication. Run them in order
     # before the final action so a submission reaches the intended pane.
     prompt_action=""
     while IFS= read -r next_action; do
       if [[ -n "$prompt_action" ]]; then
         case "$prompt_action" in
-          pane-*|window-*|copy-*|split-*|page-*) run_navigation_action "$prompt_action" ;;
+          prefix-*|copy-*) run_navigation_action "$prompt_action" ;;
           *) die "inline prompt returned an unexpected action: $prompt_action" ;;
         esac
       fi
@@ -548,7 +542,7 @@ while :; do
       exit)
         exit 0
         ;;
-      pane-*|window-*|copy-*|split-*|page-*)
+      prefix-*|copy-*)
         run_navigation_action "$prompt_action"
         ;;
       *)

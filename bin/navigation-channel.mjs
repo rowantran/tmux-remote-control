@@ -13,28 +13,26 @@ export function navigationCommand(sessionId, action) {
   // -K sends through an attached client's key table (including copy mode),
   // rather than typing into the pane. Resolve the client at keypress time.
   const client = `client=$(tmux list-clients -t ${session} -F '#{client_tty}' | head -n 1) && test -n "$client"`;
-  const keys = (key, prefixed = false) =>
-    `${client} && tmux send-keys -K -c "$client" ${prefixed ? `"$(tmux show-options -v -t ${session} prefix)" ` : ""}${shellQuote(key)}`;
+  const keys = (key) => `${client} && tmux send-keys -K -c "$client" ${shellQuote(key)}`;
   const inCopyMode = `test "$(tmux display-message -p -t ${session} '#{pane_mode}')" = copy-mode`;
+  // Append a dynamic, session-scoped status marker once. It vanishes when
+  // copy mode ends, even if the attached keyboard exits it independently.
+  const statusSuffix = "#{?#{==:#{pane_mode},copy-mode}, [scrollback],}";
+  const status = `current=$(tmux show-options -v -t ${session} status-right) && case "$current" in *${shellQuote(statusSuffix)}*) : ;; *) tmux set-option -t ${session} status-right "$current${statusSuffix}" ;; esac`;
+  const inPrefix = `test "$(tmux display-message -p -c "$client" '#{client_key_table}')" = prefix`;
   switch (action) {
-    case "pane-zoom": return `tmux resize-pane -Z -t ${session}`;
-    case "pane-down": return `tmux select-pane -t ${session} -D`;
-    case "pane-left": return `tmux select-pane -t ${session} -L`;
-    case "pane-right": return `tmux select-pane -t ${session} -R`;
-    case "pane-up": return `tmux select-pane -t ${session} -U`;
-    case "window-previous": return `tmux select-window -t ${session} -p`;
-    case "window-next": return `tmux select-window -t ${session} -n`;
-    case "copy-mode": return `${keys("C-[", true)} && ${inCopyMode}`;
+    case "prefix-start": return `${keys("C-a")} && ${inPrefix}`;
+    case "prefix-cancel": return `${client} && tmux switch-client -c "$client" -T root`;
     case "copy-quit": return `${inCopyMode} && ${keys("q")}`;
     case "copy-up": return `${inCopyMode} && ${keys("C-u")}`;
     case "copy-down": return `${inCopyMode} && ${keys("C-d")}`;
-    case "split-vertical": return keys("C-v", true);
-    case "split-horizontal": return keys("C-z", true);
-    case "page-up": return keys("PageUp");
-    case "page-down": return keys("PageDown");
+    case "copy-page-up": return `${inCopyMode} && ${keys("PageUp")}`;
+    case "copy-page-down": return `${inCopyMode} && ${keys("PageDown")}`;
     default: {
-      const match = /^window-([0-9])$/.exec(action);
-      return match ? `tmux select-window -t ${shellQuote(`${sessionId}:${match[1]}`)}` : undefined;
+      const key = action.startsWith("prefix-key:") ? action.slice("prefix-key:".length) : "";
+      if (!key) return undefined;
+      const command = `${client} && ${inPrefix} && tmux send-keys -K -c "$client" ${shellQuote(key)}`;
+      return key === "[" ? `${command} && ${inCopyMode} && (${status} || :)` : command;
     }
   }
 }

@@ -47,10 +47,6 @@ if [[ "$command" == *'#{pane_id}|#{session_name}'* ]]; then
   printf '%%7|work:0.0|work\n'
   exit 0
 fi
-if [[ "$command" == "tmux resize-pane "* || "$command" == "tmux select-pane "* || "$command" == "tmux select-window "* ]]; then
-  printf '%s\n' "$command" >>"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
-  exit 0
-fi
 if [[ "$command" == "sh -c "* && "$command" == *'client=$('* ]]; then
   PATH="$TMUX_REMOTE_CONTROL_TEST_FAKE_TMUX_DIR:$PATH" exec /bin/sh -c "$command"
 fi
@@ -67,14 +63,35 @@ cat >"$root/fake-tmux/tmux" <<'SH'
 #!/bin/sh
 case "$1" in
   list-clients) printf '/dev/pts/fake\n'; exit ;;
-  show-options) printf 'C-a\n'; exit ;;
-  display-message)
-    if [ -f "$TMUX_REMOTE_CONTROL_TEST_COPY_MODE_FILE" ]; then printf 'copy-mode\n'; fi
+  show-options)
+    if [ -f "$TMUX_REMOTE_CONTROL_TEST_STATUS_RIGHT_FILE" ]; then
+      printf '%s\n' "$(cat "$TMUX_REMOTE_CONTROL_TEST_STATUS_RIGHT_FILE")"
+    else
+      printf 'existing status'
+    fi
     exit ;;
+  set-option)
+    for value do :; done
+    printf '%s' "$value" >"$TMUX_REMOTE_CONTROL_TEST_STATUS_RIGHT_FILE"
+    exit ;;
+  display-message)
+    case "$*" in
+      *client_key_table*)
+        if [ -f "$TMUX_REMOTE_CONTROL_TEST_PREFIX_FILE" ]; then printf 'prefix\n'; else printf 'root\n'; fi ;;
+      *pane_mode*)
+        if [ -f "$TMUX_REMOTE_CONTROL_TEST_COPY_MODE_FILE" ]; then printf 'copy-mode\n'; fi ;;
+    esac
+    exit ;;
+  switch-client) rm -f "$TMUX_REMOTE_CONTROL_TEST_PREFIX_FILE" ;;
   send-keys)
     for key do :; done
-    if [ "$key" = 'C-[' ] && [ "${TMUX_REMOTE_CONTROL_TEST_COPY_MODE_DISABLED:-}" != 1 ]; then
-      touch "$TMUX_REMOTE_CONTROL_TEST_COPY_MODE_FILE"
+    if [ "$key" = C-a ] && [ "${TMUX_REMOTE_CONTROL_TEST_PREFIX_DISABLED:-}" != 1 ]; then
+      touch "$TMUX_REMOTE_CONTROL_TEST_PREFIX_FILE"
+    elif [ -f "$TMUX_REMOTE_CONTROL_TEST_PREFIX_FILE" ]; then
+      rm -f "$TMUX_REMOTE_CONTROL_TEST_PREFIX_FILE"
+      if [ "$key" = '[' ] && [ "${TMUX_REMOTE_CONTROL_TEST_COPY_MODE_DISABLED:-}" != 1 ]; then
+        touch "$TMUX_REMOTE_CONTROL_TEST_COPY_MODE_FILE"
+      fi
     elif [ "$key" = q ] || { [ "$key" = PageDown ] && [ "${TMUX_REMOTE_CONTROL_TEST_COPY_MODE_DROP_ON_PAGE:-}" = 1 ]; }; then
       rm -f "$TMUX_REMOTE_CONTROL_TEST_COPY_MODE_FILE"
     fi
@@ -114,6 +131,8 @@ export TMUX_REMOTE_CONTROL_TEST_QUERY_COMMAND="$root/query-command"
 export TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS="$root/navigation-commands"
 export TMUX_REMOTE_CONTROL_TEST_FAKE_TMUX_DIR="$root/fake-tmux"
 export TMUX_REMOTE_CONTROL_TEST_COPY_MODE_FILE="$root/copy-mode"
+export TMUX_REMOTE_CONTROL_TEST_PREFIX_FILE="$root/prefix-table"
+export TMUX_REMOTE_CONTROL_TEST_STATUS_RIGHT_FILE="$root/status-right"
 
 project_root="$(cd "$(dirname "$0")/.." && pwd)"
 script="$project_root/bin/tmux-remote-control"
@@ -277,6 +296,7 @@ run_in_pty() {
     TMUX_REMOTE_CONTROL_TEST_KEYS_AFTER_PROMPT="${2:-}" \
     TMUX_REMOTE_CONTROL_TEST_KEYS_AFTER_SCROLLBACK="${3:-}" \
     TMUX_REMOTE_CONTROL_TEST_KEYS_AFTER_BELL="${4:-}" \
+    TMUX_REMOTE_CONTROL_TEST_KEYS_AFTER_PREFIX="${5:-}" \
     python3 - "$script" <<'PY'
 import fcntl
 import os
@@ -304,6 +324,8 @@ after_scrollback_keys = os.environ["TMUX_REMOTE_CONTROL_TEST_KEYS_AFTER_SCROLLBA
 sent_after_scrollback = not after_scrollback_keys
 after_bell_keys = os.environ["TMUX_REMOTE_CONTROL_TEST_KEYS_AFTER_BELL"]
 sent_after_bell = not after_bell_keys
+after_prefix_keys = os.environ["TMUX_REMOTE_CONTROL_TEST_KEYS_AFTER_PREFIX"]
+sent_after_prefix = not after_prefix_keys
 keyboard_marker_prefix = b"\x1b[>"
 clear_screen = b"\x1b[2J\x1b[H"
 
@@ -348,6 +370,9 @@ while time.monotonic() < deadline:
         elif sent and not sent_after_prompt and prompts >= 2:
             os.write(fd, bytes.fromhex(after_prompt_keys))
             sent_after_prompt = True
+        if sent and not sent_after_prefix and b"prefix sent" in output:
+            os.write(fd, bytes.fromhex(after_prefix_keys))
+            sent_after_prefix = True
         if sent and not sent_after_scrollback and b"scrollback keys:" in output:
             os.write(fd, bytes.fromhex(after_scrollback_keys))
             sent_after_scrollback = True
@@ -367,9 +392,9 @@ else:
     sys.stderr.buffer.write(output)
     raise SystemExit("timed out waiting for tmux-remote-control")
 
-if not resized or not sent or not sent_after_prompt or not sent_after_scrollback or not sent_after_bell:
+if not resized or not sent or not sent_after_prompt or not sent_after_scrollback or not sent_after_bell or not sent_after_prefix:
     sys.stderr.buffer.write(output)
-    raise SystemExit(f"expected prompt/key stages (resized={resized}, initial={sent}, next_prompt={sent_after_prompt}, scrollback={sent_after_scrollback}, bell={sent_after_bell})")
+    raise SystemExit(f"expected prompt/key stages (resized={resized}, initial={sent}, next_prompt={sent_after_prompt}, prefix={sent_after_prefix}, scrollback={sent_after_scrollback}, bell={sent_after_bell})")
 last_clear = output.rfind(clear_screen)
 section = bytes(output[last_clear:])
 # Remove ANSI control sequences so colored text can be checked as one line.
@@ -425,8 +450,8 @@ run_in_pty "647261667404"
 [[ "$(cat "$root/input")" == "not submitted" ]]
 run_in_pty "64726166741b5b3130303b3575"
 [[ "$(cat "$root/input")" == "not submitted" ]]
-# Fixed-pane mode must not arm scrollback forwarding when Ctrl-[ is ignored.
-TMUX_REMOTE_CONTROL_TEST_FIXED=1 run_in_pty "64726166741b5b39313b357504"
+# Fixed-pane mode must not arm prefix forwarding when Ctrl-A is ignored.
+TMUX_REMOTE_CONTROL_TEST_FIXED=1 run_in_pty "64726166740104"
 [[ "$(cat "$root/input")" == "not submitted" ]]
 
 # The Pi TUI input component handles standard terminal word editing.
@@ -434,86 +459,79 @@ run_in_pty "776f726c641b5b39373b357568656c6c6f200d"
 [[ "$(cat "$root/input")" == "hello world" ]]
 run_in_pty "68656c6c6f20776f726c641b5b313b3344626967200d"
 [[ "$(cat "$root/input")" == "hello big world" ]]
-run_in_pty "6f6e652074776f207468726565011b5b313b33431b5b35373432363b33750d"
+run_in_pty "6f6e652074776f2074687265651b5b481b5b313b33431b5b35373432363b33750d"
 [[ "$(cat "$root/input")" == "one three" ]]
-run_in_pty "6f6e65207468726565011b5b313b334320666173740d"
+run_in_pty "6f6e652074687265651b5b481b5b313b334320666173740d"
 [[ "$(cat "$root/input")" == "one fast three" ]]
 
-# Navigation and zoom shortcuts run remote tmux commands through the prompt's
-# persistent channel, without submitting the draft or restarting the prompt.
-# CSI-u keeps Ctrl-J and Ctrl-number distinct from Enter and other keys. Enter
-# in the same keystroke batch must wait until navigation has been applied.
+# Ctrl-A and the next key use the same channel, preserve the draft, and
+# complete before a submission. Plain and Ctrl-modified keys use tmux bindings.
 : >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
-while IFS= read -r navigation_key; do
-  printf 'navigation lost the draft' >"$root/input"
-  run_in_pty "6b6565702074686973206472616674${navigation_key}0d"
-  [[ "$(cat "$root/input")" == "keep this draft" ]]
-done < <(python3 - <<'PY'
-for key in "fhjklpn0123456789":
-    print(f"\x1b[{ord(key)};5u".encode().hex())
-PY
-)
+for key in c v ']' n '1' '1b5b3131303b3575' '1b5b3131383b3575' '1b5b3130303b3575' '1b5b3130333b3575' '1b5b31333b3175'; do
+  case "$key" in 1b*) sequence="$key" ;; *) sequence="$(printf '%s' "$key" | od -An -tx1 | tr -d ' \n')" ;; esac
+  run_in_pty "6b656570207468697320647261667401${sequence}0d"
+  [[ "$(cat "$root/input")" == 'keep this draft' ]]
+done
 {
-  printf 'channel: tmux %s\nsubmit\n' \
-    'resize-pane -Z -t $3' \
-    'select-pane -t $3 -D' \
-    'select-pane -t $3 -L' \
-    'select-pane -t $3 -R' \
-    'select-pane -t $3 -U' \
-    'select-window -t $3 -p' \
-    'select-window -t $3 -n'
-  for index in 0 1 2 3 4 5 6 7 8 9; do
-    printf 'channel: tmux select-window -t $3:%s\nsubmit\n' "$index"
+  for key in c v ']' n 1 C-n C-v C-d C-g Enter; do
+    printf 'channel: tmux send-keys -K -c /dev/pts/fake C-a\n'
+    printf 'channel: tmux send-keys -K -c /dev/pts/fake %s\nsubmit\n' "$key"
   done
 } >"$root/expected-navigation-commands"
 diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
 
-# Prefix bindings and page keys use the same channel and preserve the draft.
-# CSI-u distinguishes Ctrl-[ from Esc; legacy Esc must still open history.
+# The status shows prefix sent after tmux confirms it, without editing the draft.
 : >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
-while IFS= read -r navigation_key; do
-  run_in_pty "6b6565702074686973206472616674${navigation_key}0d"
-  [[ "$(cat "$root/input")" == "keep this draft" ]]
-done < <(python3 - <<'PY'
-keys = [b"\x1b[91;5u", b"\x1b[118;5u", b"\x1b[122;5u", b"\x1b[5~", b"\x1b[6~"]
-for key in keys:
-    print(key.hex())
-PY
-)
-{
-  printf 'channel: tmux send-keys -K -c /dev/pts/fake %s\nsubmit\n' \
-    'C-a C-[' 'C-a C-v' 'C-a C-z' 'PageUp' 'PageDown'
-} >"$root/expected-navigation-commands"
+run_in_pty "647261667401" "" "" "" "636f6b0d"
+[[ "$(cat "$root/input")" == 'draftok' ]]
+printf 'channel: tmux send-keys -K -c /dev/pts/fake C-a\nchannel: tmux send-keys -K -c /dev/pts/fake c\nsubmit\n' >"$root/expected-navigation-commands"
 diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
 
-# If the persistent channel is unavailable, the same key goes through SSH.
+# Esc cancels both the local indicator and tmux's pending prefix table.
 : >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
-TMUX_REMOTE_CONTROL_TEST_CHANNEL_FAIL=1 run_in_pty "6b65657020746869732064726166741b5b39313b35750d"
-[[ "$(cat "$root/input")" == "keep this draft" ]]
-printf 'channel: tmux send-keys -K -c /dev/pts/fake C-a C-[\nsubmit\n' >"$root/expected-navigation-commands"
+run_in_pty "6472616674011b5b3237756f6b0d"
+[[ "$(cat "$root/input")" == 'draftok' ]]
+[[ ! -e "$TMUX_REMOTE_CONTROL_TEST_PREFIX_FILE" ]]
+printf 'channel: tmux send-keys -K -c /dev/pts/fake C-a\nchannel: tmux switch-client -c /dev/pts/fake -T root\nsubmit\n' >"$root/expected-navigation-commands"
 diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
 
-# q typed immediately after Ctrl-[ is queued for tmux even before confirmation.
+# A key release is not another prefix key, even when Ctrl remains held.
+: >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+run_in_pty "011b5b3131303b35751b5b3131303b353a3375710d"
+[[ "$(cat "$root/input")" == 'q' ]]
+printf 'channel: tmux send-keys -K -c /dev/pts/fake C-a\nchannel: tmux send-keys -K -c /dev/pts/fake C-n\nsubmit\n' >"$root/expected-navigation-commands"
+diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+
+# Outside copy mode, page keys stay in the local editor.
+: >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+run_in_pty "64726166741b5b357e1b5b367e0d"
+[[ "$(cat "$root/input")" == 'draft' ]]
+printf 'submit\n' >"$root/expected-navigation-commands"
+diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+
+# q typed immediately after prefix+[ is queued before copy-mode confirmation.
 rm -f "$TMUX_REMOTE_CONTROL_TEST_COPY_MODE_FILE"
 : >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
-run_in_pty "64726166741b5b39313b3575716f6b0d"
+run_in_pty "6472616674015b716f6b0d"
 [[ "$(cat "$root/input")" == "draftok" ]]
 [[ ! -e "$TMUX_REMOTE_CONTROL_TEST_COPY_MODE_FILE" ]]
 {
-  printf 'channel: tmux send-keys -K -c /dev/pts/fake %s\n' 'C-a C-[' 'q'
+  printf 'channel: tmux send-keys -K -c /dev/pts/fake %s\n' 'C-a' '[' 'q'
   printf 'submit\n'
 } >"$root/expected-navigation-commands"
 diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
 
 # Enter copy mode only after the remote pane confirms it. Ctrl-U/D and q go
 # straight to tmux, even with a nonempty draft; q restores normal typing.
+# The session's tmux status format gets a dynamic, idempotent indicator.
 rm -f "$TMUX_REMOTE_CONTROL_TEST_COPY_MODE_FILE"
 : >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
-run_in_pty "6b65657020746869732064726166741b5b39313b3575" "" "1b5b3131373b35751b5b3130303b3575716f6b0d"
+run_in_pty "6b6565702074686973206472616674015b" "" "1b5b3131373b35751b5b3130303b35751b5b357e1b5b367e716f6b0d"
 [[ "$(cat "$root/input")" == "keep this draftok" ]]
 [[ ! -e "$TMUX_REMOTE_CONTROL_TEST_COPY_MODE_FILE" ]]
+[[ "$(cat "$TMUX_REMOTE_CONTROL_TEST_STATUS_RIGHT_FILE")" == 'existing status#{?#{==:#{pane_mode},copy-mode}, [scrollback],}' ]]
 {
-  printf 'channel: tmux send-keys -K -c /dev/pts/fake %s\n' 'C-a C-[' 'C-u' 'C-d' 'q'
+  printf 'channel: tmux send-keys -K -c /dev/pts/fake %s\n' 'C-a' '[' 'C-u' 'C-d' 'PageUp' 'PageDown' 'q'
   printf 'submit\n'
 } >"$root/expected-navigation-commands"
 diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
@@ -521,59 +539,56 @@ diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATI
 # The controller remembers copy mode across an external-editor return.
 rm -f "$TMUX_REMOTE_CONTROL_TEST_COPY_MODE_FILE"
 : >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
-run_in_pty "64726166741b5b39313b357507" "716f6b0d"
+run_in_pty "6472616674015b07" "716f6b0d"
 [[ "$(cat "$root/input")" == $'first line\nsecond lineok' ]]
 {
-  printf 'channel: tmux send-keys -K -c /dev/pts/fake %s\n' 'C-a C-[' 'q'
+  printf 'channel: tmux send-keys -K -c /dev/pts/fake %s\n' 'C-a' '[' 'q'
   printf 'submit\n'
 } >"$root/expected-navigation-commands"
 diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
 
-# A prefix binding that does not enter copy mode leaves the prompt unchanged.
+# A prefix+[ binding that does not enter copy mode leaves the prompt unchanged.
 : >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
-TMUX_REMOTE_CONTROL_TEST_COPY_MODE_DISABLED=1 run_in_pty "64726166741b5b39313b3575" "" "" "710d"
+TMUX_REMOTE_CONTROL_TEST_COPY_MODE_DISABLED=1 run_in_pty "6472616674015b" "" "" "710d"
 [[ "$(cat "$root/input")" == "draftq" ]]
-printf 'channel: tmux send-keys -K -c /dev/pts/fake C-a C-[\nsubmit\n' >"$root/expected-navigation-commands"
+printf 'channel: tmux send-keys -K -c /dev/pts/fake C-a\nchannel: tmux send-keys -K -c /dev/pts/fake [\nsubmit\n' >"$root/expected-navigation-commands"
 diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
 
-# Failed copy-mode activation on the interactive SSH fallback also clears
-# the saved mode before the next prompt; q must edit the draft normally.
-rm -f "$TMUX_REMOTE_CONTROL_TEST_COPY_MODE_FILE"
+# A failed prefix on the interactive SSH fallback clears the saved state.
+rm -f "$TMUX_REMOTE_CONTROL_TEST_PREFIX_FILE"
 : >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
-TMUX_REMOTE_CONTROL_TEST_CHANNEL_FAIL=1 TMUX_REMOTE_CONTROL_TEST_COPY_MODE_DISABLED=1 \
-  run_in_pty "64726166741b5b39313b3575" "710d"
+TMUX_REMOTE_CONTROL_TEST_CHANNEL_FAIL=1 TMUX_REMOTE_CONTROL_TEST_PREFIX_DISABLED=1 \
+  run_in_pty "647261667401" "710d"
 [[ "$(cat "$root/input")" == "draftq" ]]
-printf 'channel: tmux send-keys -K -c /dev/pts/fake C-a C-[\nsubmit\n' >"$root/expected-navigation-commands"
+printf 'channel: tmux send-keys -K -c /dev/pts/fake C-a\nsubmit\n' >"$root/expected-navigation-commands"
 diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
 
 # The remote view can leave copy mode independently. Never leak q to the app;
 # after the failed remote check, q types into the local draft again.
 : >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
 TMUX_REMOTE_CONTROL_TEST_COPY_MODE_DROP_ON_PAGE=1 \
-  run_in_pty "64726166741b5b39313b3575" "" "1b5b367e71" "710d"
+  run_in_pty "6472616674015b" "" "1b5b367e71" "710d"
 [[ "$(cat "$root/input")" == "draftq" ]]
 {
-  printf 'channel: tmux send-keys -K -c /dev/pts/fake %s\n' 'C-a C-[' 'PageDown'
+  printf 'channel: tmux send-keys -K -c /dev/pts/fake %s\n' 'C-a' '[' 'PageDown'
   printf 'submit\n'
 } >"$root/expected-navigation-commands"
 diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
 
-# Kitty key releases match the same shortcut. They must not navigate again.
-# Ctrl-N press, release, press, release, then text and Enter:
+# Kitty key releases do not consume the next key after a prefix.
 : >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
-run_in_pty "1b5b3131303b35751b5b3131303b353a33751b5b3131303b35751b5b3131303b353a337574776963650d"
+run_in_pty "011b5b39373b353a33756e74776963650d"
 [[ "$(cat "$root/input")" == "twice" ]]
-printf 'channel: tmux select-window -t $3 -n\nchannel: tmux select-window -t $3 -n\nsubmit\n' \
+printf 'channel: tmux send-keys -K -c /dev/pts/fake C-a\nchannel: tmux send-keys -K -c /dev/pts/fake n\nsubmit\n' \
   >"$root/expected-navigation-commands"
 diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
 
-# If the channel cannot start, for example because SSH would need a password,
-# the prompt hands queued keys to the interactive SSH path, still in order.
+# If the channel cannot start, queued prefix keys use interactive SSH in order.
 : >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
 TMUX_REMOTE_CONTROL_TEST_CHANNEL_FAIL=1 \
-  run_in_pty "6b65657020746869732064726166741b5b3131303b35751b5b3131323b35750d"
+  run_in_pty "6b6565702074686973206472616674016e0d"
 [[ "$(cat "$root/input")" == "keep this draft" ]]
-printf "tmux select-window -t '\$3' -n\ntmux select-window -t '\$3' -p\nsubmit\n" \
+printf 'channel: tmux send-keys -K -c /dev/pts/fake C-a\nchannel: tmux send-keys -K -c /dev/pts/fake n\nsubmit\n' \
   >"$root/expected-navigation-commands"
 diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
 rm -f "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
@@ -680,47 +695,87 @@ SH
     exit 1
   fi
 
-  # Ctrl-N goes through the real persistent channel command and tmux. Enter
-  # in the same keystroke batch must reach the newly selected window.
+  # Exercise the remote client's real prefix table and copy-mode key table.
+  # Enter right after prefix+n must reach the newly selected window.
   tmux -L "$test_tmux_socket" new-window -d -t "test session:" -n nav-a \
     /bin/sh -c "IFS= read -r line; printf '%s' \"\$line\" >'$root/pane-nav-a'"
   tmux -L "$test_tmux_socket" new-window -d -t "test session:" -n nav-b \
     /bin/sh -c "IFS= read -r line; printf '%s' \"\$line\" >'$root/pane-nav-b'"
   tmux -L "$test_tmux_socket" select-window -t "test session:nav-a"
-  TMUX="$socket_path,0,0" python3 - "$script" <<'PY'
-import os, pty, select, sys, time
-pid, fd = pty.fork()
-if pid == 0:
-    os.execv(sys.argv[1], [sys.argv[1], "attach", "example-host", "test session", "--once"])
-output = bytearray()
-sent = False
-deadline = time.monotonic() + 10
-while time.monotonic() < deadline:
-    if select.select([fd], [], [], 0.05)[0]:
-        try:
-            output.extend(os.read(fd, 65536))
-        except OSError:
-            pass
-    if not sent and "› ".encode() in output:
-        os.write(fd, b"\x1b[110;5unav-followed\r")
-        sent = True
-    child, status = os.waitpid(pid, os.WNOHANG)
-    if child:
-        if os.waitstatus_to_exitcode(status) != 0:
-            sys.stderr.buffer.write(output)
-            raise SystemExit("real tmux navigation controller failed")
-        break
-else:
-    os.kill(pid, 9)
-    sys.stderr.buffer.write(output)
-    raise SystemExit("timed out in real tmux navigation")
+  tmux -L "$test_tmux_socket" set-option -g prefix C-a
+  TMUX_REMOTE_CONTROL_TEST_SOCKET="$test_tmux_socket" TMUX="$socket_path,0,0" python3 - "$script" <<'PY'
+import os, pty, select, signal, subprocess, sys, time
+socket = os.environ["TMUX_REMOTE_CONTROL_TEST_SOCKET"]
+client_pid, client_fd = pty.fork()
+if client_pid == 0:
+    env = dict(os.environ)
+    env.pop("TMUX", None)
+    os.execvpe("tmux", ["tmux", "-L", socket, "attach", "-t", "test session"], env)
+pid = None
+fd = None
+try:
+    for _ in range(50):
+        clients = subprocess.run(["tmux", "-L", socket, "list-clients", "-t", "test session", "-F", "#{client_tty}"],
+                                 capture_output=True, text=True)
+        if clients.stdout.strip():
+            break
+        time.sleep(0.05)
+    else:
+        raise SystemExit("tmux client did not attach")
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execv(sys.argv[1], [sys.argv[1], "attach", "example-host", "test session", "--once"])
+    output = bytearray()
+    stage = 0
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if select.select([fd], [], [], 0.05)[0]:
+            try:
+                output.extend(os.read(fd, 65536))
+            except OSError:
+                pass
+        if stage == 0 and "› ".encode() in output:
+            os.write(fd, b"\x01[")
+            stage = 1
+        if stage == 1 and b"scrollback keys:" in output:
+            mode = subprocess.run(["tmux", "-L", socket, "display-message", "-p", "-t", "test session", "#{pane_mode}"],
+                                  capture_output=True, text=True, check=True).stdout.strip()
+            if mode != "copy-mode":
+                raise SystemExit(f"remote view did not enter copy mode: {mode!r}")
+            status = subprocess.run(["tmux", "-L", socket, "display-message", "-p", "-t", "test session", "#{E:status-right}"],
+                                    capture_output=True, text=True, check=True).stdout
+            if "[scrollback]" not in status:
+                raise SystemExit(f"remote tmux status bar did not show scrollback: {status!r}")
+            os.write(fd, b"\x15\x04\x1b[5~\x1b[6~q\x01nnav-followed\r")
+            stage = 2
+        child, status = os.waitpid(pid, os.WNOHANG)
+        if child:
+            pid = None
+            if os.waitstatus_to_exitcode(status) != 0 or stage != 2:
+                sys.stderr.buffer.write(output)
+                raise SystemExit("real tmux prefix/copy-mode controller failed")
+            status_line = subprocess.run(["tmux", "-L", socket, "display-message", "-p", "-t", "test session", "#{E:status-right}"],
+                                         capture_output=True, text=True, check=True).stdout
+            if "[scrollback]" in status_line:
+                raise SystemExit("remote tmux status bar stayed in scrollback after q")
+            break
+    else:
+        sys.stderr.buffer.write(output)
+        raise SystemExit("timed out in real tmux prefix/copy-mode controller")
+finally:
+    if pid is not None:
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+    if fd is not None:
+        os.close(fd)
+    os.killpg(client_pid, signal.SIGTERM)
+    os.waitpid(client_pid, 0)
+    os.close(client_fd)
 PY
-  for _ in {1..50}; do
-    [[ -f "$root/pane-nav-b" ]] && break
-    sleep 0.05
-  done
-  [[ ! -e "$root/pane-nav-a" ]]
-  [[ "$(cat "$root/pane-nav-b")" == "nav-followed" ]]
+  [[ ! -e "$root/pane-nav-a" ]] || { echo "prefix+n did not select the next window" >&2; exit 1; }
+  [[ -f "$root/pane-nav-b" ]] && [[ "$(cat "$root/pane-nav-b")" == "nav-followed" ]] || {
+    echo "prefixed navigation did not route submission to the next window" >&2; exit 1;
+  }
 
   tmux -L "$test_tmux_socket" kill-server 2>/dev/null || true
   test_tmux_socket=""

@@ -251,30 +251,23 @@ Controls:
 - `Alt-Left` / `Alt-Right` or `Ctrl-Left` / `Ctrl-Right`: move by one word
 - `Alt-Backspace` or `Ctrl-W`: delete the previous word
 - `Alt-Delete` or `Alt-D`: delete the next word
-- `Ctrl-A` / `Ctrl-E`: move to the start or end of the line
-- `Ctrl-U`: delete to the start of the line
+- `Home` / `Ctrl-E`: move to the start or end of the line
+- `Ctrl-U`: delete to the start of the line outside scrollback
 - `Ctrl-Y` / `Alt-Y`: paste or cycle through deleted text
 - `Ctrl--`: undo
 - `Ctrl-G`: open the current draft in an external editor, then return the saved text to the input box without submitting
-- `Ctrl-F`: toggle zoom for the focused pane
-- `Ctrl-H`: select the pane below
-- `Ctrl-J`: select the pane to the left
-- `Ctrl-K`: select the pane to the right
-- `Ctrl-L`: select the pane above
-- `Ctrl-P` / `Ctrl-N`: select the previous or next window
-- `Ctrl-0` through `Ctrl-9`: select a window by index
-- `Ctrl-[`: send the remote tmux prefix followed by `Ctrl-[`; if it enters tmux copy mode, enable scrollback controls
-- `q` / `Ctrl-U` / `Ctrl-D` while scrollback controls are active: send unprefixed `q` / `Ctrl-U` / `Ctrl-D` to tmux (quit / half-page up / half-page down)
-- `Ctrl-V` / `Ctrl-Z`: send the remote tmux prefix followed by `Ctrl-V` / `Ctrl-Z` (for your split bindings)
-- `PageUp` / `PageDown`: send the unprefixed key to the remote tmux client, including in copy mode
+- `Ctrl-A`: send `Ctrl-A` immediately to the attached remote tmux client as its prefix; show `prefix sent`
+- Next key after `Ctrl-A`: send it to tmux immediately, without changing the draft. `Ctrl-A` then `[` enters copy/scrollback mode. Plain keys and modified keys such as `Ctrl-N` work, even if Ctrl remains held.
+- `Esc` after `Ctrl-A`: cancel the pending prefix locally and reset the remote client's key table. It does not open history or send the next key.
+- `q` / `Ctrl-U` / `Ctrl-D` / `PageUp` / `PageDown` in scrollback: send the unprefixed key to tmux. `q` exits copy mode and restores normal prompt controls.
 - `Ctrl-C`: discard the current draft and show a clean prompt
-- `Ctrl-D`: close the controller when scrollback controls are inactive, even with a nonempty draft
+- `Ctrl-D`: close the controller outside scrollback, even with a nonempty draft
 
-Scrollback controls appear in the prompt status only after tmux confirms that prefixed `Ctrl-[` entered copy mode. They keep your draft unchanged; `q` exits copy mode and restores normal prompt keys. If you leave copy mode from the attached terminal, the next scrollback shortcut checks tmux before forwarding; if copy mode has closed, the controller rings the bell and restores normal prompt keys without sending that key to the remote application. If the tmux binding fails or is not bound to copy mode, scrollback controls do not activate. The mode survives a return from the external editor or history picker.
+The controller shows `prefix sent` until the next key or Esc. If prefixed `[` enters tmux copy mode, the controller shows scrollback controls after tmux confirms it. It also appends a session-scoped `[scrollback]` marker to the remote tmux status-right format without replacing its existing content. The marker appears only while the active pane is in copy mode, including when copy mode is entered or left from the attached terminal. This status-format addition remains in the running tmux session after the controller closes; it does not edit `~/.tmux.conf`. The draft and cursor remain unchanged. If copy mode ends from the attached terminal, the next scrollback key is not sent to the application: the controller rings the bell and returns to normal prompt controls. A failed or unbound prefix does not activate scrollback controls. The mode survives a return from the external editor or history picker.
 
-The controller shortcuts take precedence when they overlap a standard editing key. Remote shortcuts work when the controller follows a session; prefixed keys and PageUp/PageDown also need an attached tmux client. They keep the current draft and cursor position at the prompt, and the prompt stays open. Prefix shortcuts use the session's configured prefix and the attached client's tmux key bindings; PageUp and PageDown use that client's current key table, including copy mode. Each key is sent at once over a persistent channel to a remote POSIX shell (see [Connection behavior](#connection-behavior)), so its latency is close to a tmux key binding in the attached terminal. If you press Enter or another prompt action right after a shortcut, the controller waits until the remote tmux server confirms the shortcut, so the submission reaches the newly selected pane. A failed shortcut rings the terminal bell. Fixed-pane mode ignores them and rings the terminal bell because that mode stays pinned to one pane.
+Prefix keys and scrollback controls work when following a session with an attached tmux client. The controller uses the client's tmux key table, so your tmux bindings decide what `Ctrl-A` then any key does. Keys go over a persistent remote POSIX shell (see [Connection behavior](#connection-behavior)). A message submitted immediately after a remote shortcut waits for that shortcut to finish. Failed keys ring the terminal bell. Fixed-pane mode ignores `Ctrl-A` and rings the bell; submissions stay pinned to the selected pane.
 
-The Pi TUI library negotiates the terminal keyboard protocol and normalizes legacy and extended key sequences. Distinct sequences are necessary because traditional terminal input cannot tell some `Ctrl-number` keys apart from other control keys. Unsupported terminals can still use the pane shortcuts except `Ctrl-J`, plus `Ctrl-P` and `Ctrl-N`. In legacy keyboard mode `Ctrl-[` and `Esc` are indistinguishable, so `Esc` keeps its history shortcut and the prefixed `Ctrl-[` shortcut requires distinct key encoding (such as CSI-u).
+The Pi TUI library negotiates the terminal keyboard protocol and normalizes legacy and extended key sequences. Unsupported keyboards may not distinguish some modified keys (such as `Ctrl-J` from Enter). Pasted text and unknown key sequences are not treated as one prefixed key: they ring the bell and leave the prefix pending. Outside scrollback, PageUp and PageDown use the prompt's normal editor behavior.
 
 Pressing Enter on an empty prompt shows another prompt. After saving and exiting the external editor, review or edit the draft in the input box, then press Enter to send it. Exiting the editor does not send or record a message in history. The controller removes exactly one final LF or CRLF when the editor returns, not when sending. Other whitespace and newlines stay intact until you edit the draft inline; intentional newlines you add afterward are preserved.
 

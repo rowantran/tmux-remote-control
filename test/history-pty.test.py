@@ -298,7 +298,7 @@ else:
         controller.send("\x1b")
         controller.wait_prompt(3)
         self.assertEqual(os.get_terminal_size(controller.fd).lines, 8)
-        self.navigate(controller, "\x1b[107;5u")  # Navigation must not resize.
+        self.navigate(controller, "\x01k")  # Prefix navigation must not resize.
         controller.exit()
         self.assertEqual(self.sizes(), ["compact", "expanded", "compact", "expanded", "compact"])
 
@@ -415,7 +415,7 @@ else:
         controller = self.start()
         controller.send("recover this message\r")
         controller.wait_prompt(2)
-        self.navigate(controller, "\x1b[A\x1b[107;5u")  # Up, Ctrl-K selects a different pane
+        self.navigate(controller, "\x1b[A\x01k")  # Up, prefix+k selects a different pane
         self.assertEqual(self.sent(), [{"text": "recover this message", "target": "A"}])
         controller.send("\r")
         controller.wait_prompt(3)
@@ -451,7 +451,7 @@ else:
         controller.open_history()
         controller.send("\x03")
         controller.wait_prompt(2)
-        self.navigate(controller, "do not lose this\x1b[27u\x1b[107;5u")
+        self.navigate(controller, "do not lose this\x1b[27u\x01k")
         controller.send("\r")
         controller.wait_prompt(3)
         self.assertEqual([entry["text"] for entry in self.sent()], ["do not lose this"])
@@ -463,7 +463,7 @@ else:
         controller.open_history(b"\x1b[27u")
         controller.send("\x1b")
         controller.wait_prompt(2)
-        self.navigate(controller, " \x1b[27u\x1b[107;5u")
+        self.navigate(controller, " \x1b[27u\x01k")
         controller.send("\r")
         controller.wait_prompt(3)
         self.assertEqual([entry["text"] for entry in self.sent()], [" "])
@@ -505,7 +505,7 @@ else:
         start = len(controller.output)
         controller.send("\x1b[A" * 9)
         controller.wait(lambda: "↓ 5 more" in controller.plain(start), "hidden rows below editor draft")
-        self.navigate(controller, "\x1b[107;5u")  # Ctrl-K: keep the editor draft, change the target.
+        self.navigate(controller, "\x01k")  # Prefix+k: keep the editor draft, change the target.
         self.assertEqual(self.sent(), [])
         # The prompt stays open, so the cursor is still on the first line.
         controller.send("\x1b[B" * 9 + "\x05!\x1b[13;2u\r")  # Append text and an intentional final newline.
@@ -575,7 +575,7 @@ else:
         self.assertEqual(self.draft(), text.encode())  # CRLF already removed, exactly once.
         self.assertEqual(self.sent(), [])
         self.assertEqual(self.records(), [])
-        self.navigate(controller, "\x1b[D\x1b[C\x1b[107;5u")  # Cursor motion does not edit the payload.
+        self.navigate(controller, "\x1b[D\x1b[C\x01k")  # Cursor motion does not edit the payload.
         controller.send("\r")
         controller.wait_prompt(2)
         self.assertEqual(self.sent(), [{"text": text, "target": "B"}])
@@ -593,8 +593,8 @@ else:
         self.assertEqual((self.root / "editor-initial").read_bytes(), b"newest")
         self.assertEqual(self.draft(), edited)
         # Browse position survives editor return and navigation keys.
-        for keys, shown in [("\x1b[A\x1b[107;5u", "oldest"), ("\x1b[B\x1b[112;5u", "edited"),
-                            ("\x1b[B\x1b[107;5u", "original draft")]:
+        for keys, shown in [("\x1b[A\x01k", "oldest"), ("\x1b[B\x01p", "edited"),
+                            ("\x1b[B\x01k", "original draft")]:
             start = len(controller.output)
             self.navigate(controller, keys)
             controller.wait(lambda: f"› {shown}" in controller.plain(start).replace("\t", " ").replace("  ", " "),
@@ -628,7 +628,7 @@ else:
         self.assertEqual(self.records()[0]["status"], "unconfirmed")
         (self.root / "fail-send").unlink()
         controller = self.start()
-        self.navigate(controller, "\x1b[A\x1b[107;5u")
+        self.navigate(controller, "\x1b[A\x01k")
         self.assertEqual(len(self.sent()), 1)
         controller.exit()
 

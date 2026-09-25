@@ -12,6 +12,7 @@ import {
 import { HistoryInput, isHistoryShortcut } from "./history-input.mjs";
 import { getHistoryDirectory, loadHistory } from "./history-store.mjs";
 import { NavigationChannel } from "./navigation-channel.mjs";
+import { remoteKey } from "./remote-key.mjs";
 
 const [
   draftPath,
@@ -58,8 +59,13 @@ let finished = false;
 // The remote check confirms entry; keep pending keys routed to tmux while
 // that check is in flight. Saved state survives history/editor prompt restarts.
 let scrollback = state.scrollback === true ? "on" : "off";
+let prefix = state.prefix === true ? "sent" : "off";
 const setScrollback = (value) => {
   scrollback = value;
+  tui.requestRender();
+};
+const setPrefix = (value) => {
+  prefix = value;
   tui.requestRender();
 };
 
@@ -82,7 +88,8 @@ class ControllerPrompt {
       hostColor(controllerHost) +
       muted(" → ") +
       targetColor(controllerTarget) +
-      (scrollback === "off" ? "" : `${muted("  · ")}${targetColor(scrollback === "pending" ? "checking scrollback" : "scrollback keys: q, Ctrl-U, Ctrl-D")}`);
+      (prefix === "off" ? "" : `${muted("  · ")}${targetColor(prefix === "pending" ? "sending prefix" : "prefix sent")}`) +
+      (scrollback === "off" ? "" : `${muted("  · ")}${targetColor(scrollback === "pending" ? "checking scrollback" : "scrollback keys: q, Ctrl-U, Ctrl-D, PageUp/Down")}`);
     const content = [truncateToWidth(status, safeWidth), ...this.input.render(safeWidth)];
     const topPadding = Math.max(0, terminal.rows - content.length);
     return [...Array(topPadding).fill(""), ...content];
@@ -95,9 +102,9 @@ class ControllerPrompt {
 
 const bell = () => process.stdout.write("\x07");
 
-// Navigation keys go through one persistent SSH channel without leaving this
-// prompt. Fixed-pane mode has no session to navigate. Without a control path
-// (for example, when this helper runs on its own), bash handles every key.
+// Remote keys go through one persistent SSH channel without leaving this
+// prompt. Fixed-pane mode has no session to control through a client. Without
+// a control path (for example, when this helper runs alone), bash sends keys.
 const navigation =
   navigationSessionId && controlPath
     ? new NavigationChannel({
@@ -105,10 +112,12 @@ const navigation =
         sessionId: navigationSessionId,
         sshOptions: ["-o", "ControlMaster=auto", "-o", "ControlPersist=10m", "-o", `ControlPath=${controlPath}`],
         onSuccess: (action) => {
-          if (action === "copy-mode" && scrollback === "pending") setScrollback("on");
+          if (action === "prefix-start" && prefix === "pending") setPrefix("sent");
+          if (action === "prefix-key:[" && scrollback === "pending") setScrollback("on");
         },
         onFailure: (action) => {
-          if (action === "copy-mode" || action.startsWith("copy-")) setScrollback("off");
+          if (action.startsWith("prefix-")) setPrefix("off");
+          if (action === "prefix-key:[" || action.startsWith("copy-")) setScrollback("off");
           bell();
         },
         // The channel could not start, so no queued key reached the remote
@@ -123,32 +132,15 @@ async function finish(action, leadingActions = []) {
   // Stop reading first, so keys typed while navigation drains stay in the
   // terminal buffer for the next prompt instead of being discarded here.
   tui.stop();
-  // Apply earlier navigation before a submission or editor action can use
+  // Apply earlier remote keys before a submission or editor action can use
   // the focused pane. Unsent keys are passed to bash, in order.
   const unsent = navigation ? await navigation.drain() : [];
   navigation?.close();
   writeFileSync(draftPath, input.getValue());
-  if (statePath) writeFileSync(statePath, JSON.stringify({ ...input.getState(), scrollback: scrollback !== "off" }));
+  if (statePath) writeFileSync(statePath, JSON.stringify({ ...input.getState(), scrollback: scrollback !== "off", prefix: prefix !== "off" }));
   const actions = [...leadingActions, ...unsent, action];
   writeFileSync(actionPath, actions.map((name) => `${name}\n`).join(""));
 }
-
-const actions = [
-  [Key.ctrl("g"), "editor"],
-  [Key.ctrl("f"), "pane-zoom"],
-  [Key.ctrl("h"), "pane-down"],
-  [Key.ctrl("j"), "pane-left"],
-  [Key.ctrl("k"), "pane-right"],
-  [Key.ctrl("l"), "pane-up"],
-  [Key.ctrl("p"), "window-previous"],
-  [Key.ctrl("n"), "window-next"],
-  [Key.ctrl("["), "copy-mode"],
-  [Key.ctrl("v"), "split-vertical"],
-  [Key.ctrl("z"), "split-horizontal"],
-  [Key.pageUp, "page-up"],
-  [Key.pageDown, "page-down"],
-  ...Array.from({ length: 10 }, (_, index) => [Key.ctrl(String(index)), `window-${index}`]),
-];
 
 input.onSubmit = () => finish("submit");
 
@@ -159,10 +151,30 @@ tui.addInputListener((data) => {
   // Kitty key releases match the same shortcuts as presses. The TUI already
   // drops them before the editor; never let them repeat a controller action.
   if (isKeyRelease(data)) return undefined;
+  if (prefix !== "off") {
+    if (matchesKey(data, Key.escape)) {
+      setPrefix("off");
+      if (navigation) navigation.send("prefix-cancel");
+      else finish("prefix-cancel");
+      return { consume: true };
+    }
+    const key = remoteKey(data);
+    if (!key) {
+      bell(); // A paste or unknown sequence is not one key. Keep the prefix.
+      return { consume: true };
+    }
+    setPrefix("off");
+    if (key === "[") setScrollback("pending");
+    if (navigation) navigation.send(`prefix-key:${key}`);
+    else finish(`prefix-key:${key}`);
+    return { consume: true };
+  }
   if (scrollback !== "off") {
     const action = matchesKey(data, Key.ctrl("u")) ? "copy-up"
       : matchesKey(data, Key.ctrl("d")) ? "copy-down"
-      : matchesKey(data, "q") ? "copy-quit" : undefined;
+      : matchesKey(data, "q") ? "copy-quit"
+      : matchesKey(data, Key.pageUp) ? "copy-page-up"
+      : matchesKey(data, Key.pageDown) ? "copy-page-down" : undefined;
     if (action) {
       // q returns control to the draft immediately; the remote command still
       // runs in order and refuses to type q if the pane has left copy mode.
@@ -171,6 +183,14 @@ tui.addInputListener((data) => {
       else finish(action);
       return { consume: true };
     }
+  }
+  if (matchesKey(data, Key.ctrl("a"))) {
+    if (navigationSessionId) {
+      setPrefix("pending");
+      if (navigation) navigation.send("prefix-start");
+      else finish("prefix-start");
+    } else bell();
+    return { consume: true };
   }
   if (isHistoryShortcut(data, input.getValue())) {
     finish("history");
@@ -187,17 +207,9 @@ tui.addInputListener((data) => {
     finish("exit");
     return { consume: true };
   }
-  for (const [key, action] of actions) {
-    // In legacy terminals Ctrl-[ and Esc are the same byte. Keep Esc's
-    // existing history/editor behavior; only forward an unambiguous Ctrl-[.
-    if (action === "copy-mode" && data === "\x1b") continue;
-    if (matchesKey(data, key)) {
-      if (action === "copy-mode" && navigationSessionId) setScrollback("pending");
-      if (navigation && action !== "editor") navigation.send(action);
-      else if (action !== "editor" && controlPath && !navigationSessionId) bell();
-      else finish(action);
-      return { consume: true };
-    }
+  if (matchesKey(data, Key.ctrl("g"))) {
+    finish("editor");
+    return { consume: true };
   }
   return undefined;
 });

@@ -46,28 +46,23 @@ function channel(ssh, options = {}) {
 }
 
 test("maps every controller action to a quoted tmux command", () => {
-  assert.equal(navigationCommand("$3", "pane-zoom"), "tmux resize-pane -Z -t '$3'");
-  assert.equal(navigationCommand("$3", "pane-down"), "tmux select-pane -t '$3' -D");
-  assert.equal(navigationCommand("$3", "pane-left"), "tmux select-pane -t '$3' -L");
-  assert.equal(navigationCommand("$3", "pane-right"), "tmux select-pane -t '$3' -R");
-  assert.equal(navigationCommand("$3", "pane-up"), "tmux select-pane -t '$3' -U");
-  assert.equal(navigationCommand("$3", "window-previous"), "tmux select-window -t '$3' -p");
-  assert.equal(navigationCommand("$3", "window-next"), "tmux select-window -t '$3' -n");
-  assert.equal(navigationCommand("$3", "window-7"), "tmux select-window -t '$3:7'");
-  const client = `client=$(tmux list-clients -t '$3' -F '#{client_tty}' | head -n 1) && test -n "$client" && tmux send-keys -K -c "$client"`;
+  const client = `client=$(tmux list-clients -t '$3' -F '#{client_tty}' | head -n 1) && test -n "$client"`;
+  const send = (key) => `${client} && tmux send-keys -K -c "$client" '${key}'`;
   const mode = `test "$(tmux display-message -p -t '$3' '#{pane_mode}')" = copy-mode`;
-  assert.equal(navigationCommand("$3", "copy-mode"), `${client} "$(tmux show-options -v -t '$3' prefix)" 'C-[' && ${mode}`);
-  assert.equal(navigationCommand("$3", "copy-quit"), `${mode} && ${client} 'q'`);
-  assert.equal(navigationCommand("$3", "copy-up"), `${mode} && ${client} 'C-u'`);
-  assert.equal(navigationCommand("$3", "copy-down"), `${mode} && ${client} 'C-d'`);
-  assert.equal(navigationCommand("$3", "split-vertical"), `${client} "$(tmux show-options -v -t '$3' prefix)" 'C-v'`);
-  assert.equal(navigationCommand("$3", "split-horizontal"), `${client} "$(tmux show-options -v -t '$3' prefix)" 'C-z'`);
-  assert.equal(navigationCommand("$3", "page-up"), `${client} 'PageUp'`);
-  assert.equal(navigationCommand("$3", "page-down"), `${client} 'PageDown'`);
-  assert.equal(navigationCommand("it's", "copy-mode").includes("-t 'it'\\''s'"), true);
-  assert.equal(navigationCommand("it's", "window-next"), "tmux select-window -t 'it'\\''s' -n");
+  const prefix = `test "$(tmux display-message -p -c "$client" '#{client_key_table}')" = prefix`;
+  assert.equal(navigationCommand("$3", "prefix-start"), `${send("C-a")} && ${prefix}`);
+  assert.equal(navigationCommand("$3", "prefix-cancel"), `${client} && tmux switch-client -c "$client" -T root`);
+  assert.ok(navigationCommand("$3", "prefix-key:[").startsWith(`${client} && ${prefix} && tmux send-keys -K -c "$client" '[' && ${mode} && (`));
+  assert.ok(navigationCommand("$3", "prefix-key:[").includes("status-right \"$current#{?#{==:#{pane_mode},copy-mode}, [scrollback],}\""));
+  assert.equal(navigationCommand("$3", "prefix-key:C-n"), `${client} && ${prefix} && tmux send-keys -K -c "$client" 'C-n'`);
+  assert.equal(navigationCommand("$3", "prefix-key:;"), `${client} && ${prefix} && tmux send-keys -K -c "$client" ';'`);
+  for (const [action, key] of [["copy-quit", "q"], ["copy-up", "C-u"], ["copy-down", "C-d"], ["copy-page-up", "PageUp"], ["copy-page-down", "PageDown"]]) {
+    assert.equal(navigationCommand("$3", action), `${mode} && ${send(key)}`);
+  }
+  assert.ok(navigationCommand("it's", "prefix-key:[").includes("-t 'it'\\''s'"));
   assert.equal(navigationCommand("$3", "editor"), undefined);
-  assert.equal(navigationCommand("$3", "window-10"), undefined);
+  assert.equal(navigationCommand("$3", "prefix-key:"), undefined);
+  assert.equal(navigationCommand("$3", "window-7"), undefined);
 });
 
 test("uses the shared control connection without an interactive prompt", () => {
@@ -82,22 +77,20 @@ test("uses the shared control connection without an interactive prompt", () => {
 test("writes commands only after the remote shell is ready, then in order", async () => {
   const ssh = fakeSsh();
   const nav = channel(ssh);
-  nav.send("window-next");
-  nav.send("pane-left");
+  nav.send("prefix-start");
+  nav.send("prefix-key:C-n");
   await tick();
   const [child] = ssh.children;
   assert.equal(child.written, "");
   child.reply(READY_MARKER);
   await tick();
-  assert.deepEqual(commands(child), ["tmux select-window -t '$3' -n", "tmux select-pane -t '$3' -L"]);
+  assert.deepEqual(commands(child), [navigationCommand("$3", "prefix-start"), navigationCommand("$3", "prefix-key:C-n")]);
   assert.match(child.written, new RegExp(`; echo "${STATUS_MARKER} \\$\\?"\\n$`));
-  nav.send("window-2");
-  nav.send("copy-mode");
-  nav.send("page-up");
+  nav.send("prefix-key:[");
+  nav.send("copy-page-up");
   await tick();
-  assert.equal(commands(child).at(-3), "tmux select-window -t '$3:2'");
-  assert.equal(commands(child).at(-2), navigationCommand("$3", "copy-mode"));
-  assert.equal(commands(child).at(-1), navigationCommand("$3", "page-up"));
+  assert.equal(commands(child).at(-2), navigationCommand("$3", "prefix-key:["));
+  assert.equal(commands(child).at(-1), navigationCommand("$3", "copy-page-up"));
   assert.equal(ssh.children.length, 1, "one channel serves every key");
 });
 
@@ -108,8 +101,8 @@ test("drain waits for confirmation of every sent command", async () => {
   const [child] = ssh.children;
   child.reply(READY_MARKER);
   await tick();
-  nav.send("window-next");
-  nav.send("window-next");
+  nav.send("prefix-start");
+  nav.send("prefix-key:[");
   let drained;
   nav.drain().then((unsent) => (drained = unsent));
   await tick();
@@ -130,7 +123,7 @@ test("confirms copy-mode only after the remote status succeeds", async () => {
     onSuccess: (action) => successes.push(action),
     onFailure: (action) => failures.push(action),
   });
-  nav.send("copy-mode");
+  nav.send("prefix-key:[");
   nav.send("copy-up");
   const [child] = ssh.children;
   child.reply(READY_MARKER);
@@ -139,7 +132,7 @@ test("confirms copy-mode only after the remote status succeeds", async () => {
   child.reply(`${STATUS_MARKER} 0`);
   child.reply(`${STATUS_MARKER} 1`);
   await tick();
-  assert.deepEqual(successes, ["copy-mode"]);
+  assert.deepEqual(successes, ["prefix-key:["]);
   assert.deepEqual(failures, ["copy-up"]);
 });
 
@@ -147,17 +140,17 @@ test("reports failed commands without resending them", async () => {
   const ssh = fakeSsh();
   const failures = [];
   const nav = channel(ssh, { onFailure: (action) => failures.push(action) });
-  nav.send("pane-up");
-  nav.send("window-9");
+  nav.send("prefix-start");
+  nav.send("prefix-key:C-n");
   const [child] = ssh.children;
   child.reply(READY_MARKER);
   child.reply(`${STATUS_MARKER} 1`);
   await tick();
-  assert.deepEqual(failures, ["pane-up"]);
-  child.exit(); // window-9 was sent but never confirmed.
+  assert.deepEqual(failures, ["prefix-start"]);
+  child.exit(); // The next key was sent but never confirmed.
   await tick();
-  assert.deepEqual(failures, ["pane-up", "window-9"]);
-  nav.send("window-next");
+  assert.deepEqual(failures, ["prefix-start", "prefix-key:C-n"]);
+  nav.send("prefix-start");
   assert.equal(ssh.children.length, 2, "the next key opens a new channel");
   assert.equal(ssh.children[1].written, "");
 });
@@ -166,11 +159,11 @@ test("hands back queued keys when the channel exits before it is ready", async (
   const ssh = fakeSsh();
   const fallbacks = [];
   const nav = channel(ssh, { onFallback: (actions) => fallbacks.push(actions) });
-  nav.send("window-next");
-  nav.send("pane-down");
+  nav.send("prefix-start");
+  nav.send("prefix-key:[");
   ssh.children[0].exit();
   await tick();
-  assert.deepEqual(fallbacks, [["window-next", "pane-down"]]);
+  assert.deepEqual(fallbacks, [["prefix-start", "prefix-key:["]]);
   assert.equal(ssh.children[0].written, "");
 });
 
@@ -178,10 +171,10 @@ test("drain returns unsent keys instead of calling the fallback", async () => {
   const ssh = fakeSsh();
   const fallbacks = [];
   const nav = channel(ssh, { onFallback: (actions) => fallbacks.push(actions) });
-  nav.send("window-previous");
+  nav.send("prefix-cancel");
   const result = nav.drain();
   ssh.children[0].exit();
-  assert.deepEqual(await result, ["window-previous"]);
+  assert.deepEqual(await result, ["prefix-cancel"]);
   assert.deepEqual(fallbacks, []);
 });
 
