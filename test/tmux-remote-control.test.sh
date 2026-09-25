@@ -583,6 +583,71 @@ printf 'channel: tmux send-keys -K -c /dev/pts/fake C-a\nchannel: tmux send-keys
   >"$root/expected-navigation-commands"
 diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
 
+# Ctrl-H/J/K/L go to tmux without the prefix and leave the draft unchanged.
+# Backspace (0x7f) still edits; a bare newline byte is not Ctrl-J.
+: >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+run_in_pty "6472616674787f080b0c1b5b3130363b35750d"
+[[ "$(cat "$root/input")" == 'draft' ]]
+{
+  printf 'channel: tmux send-keys -K -c /dev/pts/fake %s\n' 'C-h' 'C-k' 'C-l' 'C-j'
+  printf 'submit\n'
+} >"$root/expected-navigation-commands"
+diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+
+# After the prefix, Ctrl-L is a prefixed key rather than a direct key.
+: >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+run_in_pty "6472616674010c0d"
+[[ "$(cat "$root/input")" == 'draft' ]]
+printf 'channel: tmux send-keys -K -c /dev/pts/fake C-a\nchannel: tmux send-keys -K -c /dev/pts/fake C-l\nsubmit\n' \
+  >"$root/expected-navigation-commands"
+diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+
+# Fixed-pane mode has no client to send Ctrl-L to; it keeps the draft as is.
+printf 'unchanged' >"$root/input"
+TMUX_REMOTE_CONTROL_TEST_FIXED=1 run_in_pty "64726166740c0d"
+[[ "$(cat "$root/input")" == 'draft' ]]
+
+# Scrollback forwards v, h/j/k/l, b/w/e, 0, $ (legacy and CSI-u), and Enter.
+# Enter keeps scrollback controls; only q returns to typing in the draft.
+rm -f "$TMUX_REMOTE_CONTROL_TEST_COPY_MODE_FILE"
+: >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+run_in_pty "6472616674015b" "" "76686a6b6c62776530241b5b35323b32750d716f6b0d"
+[[ "$(cat "$root/input")" == 'draftok' ]]
+[[ ! -e "$TMUX_REMOTE_CONTROL_TEST_COPY_MODE_FILE" ]]
+{
+  printf 'channel: tmux send-keys -K -c /dev/pts/fake %s\n' 'C-a' '[' 'v' 'h' 'j' 'k' 'l' 'b' 'w' 'e' '0' '$' '$' 'Enter' 'q'
+  printf 'submit\n'
+} >"$root/expected-navigation-commands"
+diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+
+# Prefix+x waits for tmux's kill-pane confirmation. Other keys ring the bell
+# and change nothing; y, n, or Esc goes to tmux and restores normal typing.
+for answer in y n Escape; do
+  case "$answer" in
+    y) keys="6472616674017871796f6b0d" ;;
+    n) keys="647261667401786e6f6b0d" ;;
+    Escape) keys="647261667401781b5b3237756f6b0d" ;;
+  esac
+  : >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+  run_in_pty "$keys"
+  [[ "$(cat "$root/input")" == 'draftok' ]]
+  {
+    printf 'channel: tmux send-keys -K -c /dev/pts/fake %s\n' 'C-a' 'x' "$answer"
+    printf 'submit\n'
+  } >"$root/expected-navigation-commands"
+  diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+done
+
+# The confirmation mode survives prompt restarts on the interactive SSH path.
+: >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+TMUX_REMOTE_CONTROL_TEST_CHANNEL_FAIL=1 run_in_pty "6472616674017871796f6b0d"
+[[ "$(cat "$root/input")" == 'draftok' ]]
+{
+  printf 'channel: tmux send-keys -K -c /dev/pts/fake %s\n' 'C-a' 'x' 'y'
+  printf 'submit\n'
+} >"$root/expected-navigation-commands"
+diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+
 # If the channel cannot start, queued prefix keys use interactive SSH in order.
 : >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
 TMUX_REMOTE_CONTROL_TEST_CHANNEL_FAIL=1 \
@@ -702,7 +767,17 @@ SH
   tmux -L "$test_tmux_socket" new-window -d -t "test session:" -n nav-b \
     /bin/sh -c "IFS= read -r line; printf '%s' \"\$line\" >'$root/pane-nav-b'"
   tmux -L "$test_tmux_socket" select-window -t "test session:nav-a"
+  # Scrollback keys select one of its identical lines. The controller then
+  # kills this focused pane through prefix+x and tmux's confirmation prompt,
+  # which focuses the reader pane again.
+  tmux -L "$test_tmux_socket" split-window -t "test session:nav-a" \
+    /bin/sh -c "yes 'alpha beta gamma' | head -n 100; sleep 60"
   tmux -L "$test_tmux_socket" set-option -g prefix C-a
+  tmux -L "$test_tmux_socket" set-option -g mode-keys vi
+  # A common vi setup: v starts a selection; Enter copies without leaving.
+  tmux -L "$test_tmux_socket" bind-key -T copy-mode-vi v send-keys -X begin-selection
+  tmux -L "$test_tmux_socket" bind-key -T copy-mode-vi Enter send-keys -X copy-selection
+  tmux -L "$test_tmux_socket" bind-key -n C-l set-option -g @direct-key received
   TMUX_REMOTE_CONTROL_TEST_SOCKET="$test_tmux_socket" TMUX="$socket_path,0,0" python3 - "$script" <<'PY'
 import os, pty, select, signal, subprocess, sys, time
 socket = os.environ["TMUX_REMOTE_CONTROL_TEST_SOCKET"]
@@ -729,9 +804,16 @@ try:
     stage = 0
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
-        if select.select([fd], [], [], 0.05)[0]:
+        readable = select.select([fd, client_fd], [], [], 0.05)[0]
+        if fd in readable:
             try:
                 output.extend(os.read(fd, 65536))
+            except OSError:
+                pass
+        if client_fd in readable:
+            # Drain the attached view so tmux never blocks on a full terminal.
+            try:
+                os.read(client_fd, 65536)
             except OSError:
                 pass
         if stage == 0 and "› ".encode() in output:
@@ -746,18 +828,40 @@ try:
                                     capture_output=True, text=True, check=True).stdout
             if "[scrollback]" not in status:
                 raise SystemExit(f"remote tmux status bar did not show scrollback: {status!r}")
-            os.write(fd, b"\x15\x04\x1b[5~\x1b[6~q\x01nnav-followed\r")
+            # Motion keys select one whole line; Enter copies it without
+            # leaving copy mode.
+            os.write(fd, b"\x15\x04\x1b[5~\x1b[6~kkjk0vwebe$hl\r")
             stage = 2
+        if stage == 2:
+            buffers = subprocess.run(["tmux", "-L", socket, "list-buffers", "-F", "#{buffer_sample}"],
+                                     capture_output=True, text=True).stdout.splitlines()
+            mode = subprocess.run(["tmux", "-L", socket, "display-message", "-p", "-t", "test session", "#{pane_mode}"],
+                                  capture_output=True, text=True, check=True).stdout.strip()
+            if buffers and buffers[0] == "alpha beta gamma":
+                if mode != "copy-mode":
+                    raise SystemExit(f"Enter left remote copy mode: {mode!r}")
+                # q leaves copy mode. Ctrl-L uses a root-table binding. y
+                # answers the prefix+x confirmation.
+                os.write(fd, b"q\x0c\x01xy\x01nnav-followed\r")
+                stage = 3
         child, status = os.waitpid(pid, os.WNOHANG)
         if child:
             pid = None
-            if os.waitstatus_to_exitcode(status) != 0 or stage != 2:
+            if os.waitstatus_to_exitcode(status) != 0 or stage != 3:
                 sys.stderr.buffer.write(output)
                 raise SystemExit("real tmux prefix/copy-mode controller failed")
             status_line = subprocess.run(["tmux", "-L", socket, "display-message", "-p", "-t", "test session", "#{E:status-right}"],
                                          capture_output=True, text=True, check=True).stdout
             if "[scrollback]" in status_line:
                 raise SystemExit("remote tmux status bar stayed in scrollback after q")
+            direct = subprocess.run(["tmux", "-L", socket, "show-options", "-gqv", "@direct-key"],
+                                    capture_output=True, text=True, check=True).stdout.strip()
+            if direct != "received":
+                raise SystemExit("Ctrl-L did not reach the remote root key table")
+            panes = subprocess.run(["tmux", "-L", socket, "list-panes", "-t", "test session:nav-a"],
+                                   capture_output=True, text=True, check=True).stdout.splitlines()
+            if len(panes) != 1:
+                raise SystemExit(f"prefix+x then y did not kill the focused pane: {panes!r}")
             break
     else:
         sys.stderr.buffer.write(output)
@@ -768,9 +872,10 @@ finally:
         os.waitpid(pid, 0)
     if fd is not None:
         os.close(fd)
+    # Close the attached view's terminal first; tmux cannot block writing to it.
+    os.close(client_fd)
     os.killpg(client_pid, signal.SIGTERM)
     os.waitpid(client_pid, 0)
-    os.close(client_fd)
 PY
   [[ ! -e "$root/pane-nav-a" ]] || { echo "prefix+n did not select the next window" >&2; exit 1; }
   [[ -f "$root/pane-nav-b" ]] && [[ "$(cat "$root/pane-nav-b")" == "nav-followed" ]] || {

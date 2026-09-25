@@ -59,7 +59,11 @@ let finished = false;
 // The remote check confirms entry; keep pending keys routed to tmux while
 // that check is in flight. Saved state survives history/editor prompt restarts.
 let scrollback = state.scrollback === true ? "on" : "off";
-let prefix = state.prefix === true ? "sent" : "off";
+// The prefix is shown as sent right away; a failed remote check clears it.
+let prefix = state.prefix === true;
+// Prefix+x asks tmux to confirm before it kills the pane. Until y, n, or Esc
+// answers that prompt, those keys go to tmux instead of the draft.
+let confirm = state.confirm === true;
 const setScrollback = (value) => {
   scrollback = value;
   tui.requestRender();
@@ -68,6 +72,21 @@ const setPrefix = (value) => {
   prefix = value;
   tui.requestRender();
 };
+const setConfirm = (value) => {
+  confirm = value;
+  tui.requestRender();
+};
+
+// Keys typed in scrollback go to tmux without the prefix, as tmux key names.
+// Only q leaves copy mode.
+const scrollbackKeys = new Set([
+  "q", "v", "h", "j", "k", "l", "b", "w", "e", "0", "$",
+  "Enter", "C-u", "C-d", "PageUp", "PageDown",
+]);
+// Pane navigation keys go to tmux without the prefix, for root-table bindings
+// such as vim-tmux-navigator.
+const directKeys = ["h", "j", "k", "l"].map((key) => [Key.ctrl(key), `C-${key}`]);
+const matchingKey = (data, keys) => keys.find(([pattern]) => matchesKey(data, pattern))?.[1];
 
 const colorsEnabled = !("NO_COLOR" in process.env);
 const color = (red, green, blue, text) =>
@@ -88,8 +107,9 @@ class ControllerPrompt {
       hostColor(controllerHost) +
       muted(" → ") +
       targetColor(controllerTarget) +
-      (prefix === "off" ? "" : `${muted("  · ")}${targetColor(prefix === "pending" ? "sending prefix" : "prefix sent")}`) +
-      (scrollback === "off" ? "" : `${muted("  · ")}${targetColor(scrollback === "pending" ? "checking scrollback" : "scrollback keys: q, Ctrl-U, Ctrl-D, PageUp/Down")}`);
+      (prefix ? `${muted("  · ")}${targetColor("prefix sent")}` : "") +
+      (confirm ? `${muted("  · ")}${targetColor("confirm close: y / n")}` : "") +
+      (scrollback === "off" ? "" : `${muted("  · ")}${targetColor(scrollback === "pending" ? "checking scrollback" : "scrollback keys: q, v, hjkl, bwe0$, Enter, Ctrl-U/D, PageUp/Down")}`);
     const content = [truncateToWidth(status, safeWidth), ...this.input.render(safeWidth)];
     const topPadding = Math.max(0, terminal.rows - content.length);
     return [...Array(topPadding).fill(""), ...content];
@@ -112,11 +132,11 @@ const navigation =
         sessionId: navigationSessionId,
         sshOptions: ["-o", "ControlMaster=auto", "-o", "ControlPersist=10m", "-o", `ControlPath=${controlPath}`],
         onSuccess: (action) => {
-          if (action === "prefix-start" && prefix === "pending") setPrefix("sent");
           if (action === "prefix-key:[" && scrollback === "pending") setScrollback("on");
         },
         onFailure: (action) => {
-          if (action.startsWith("prefix-")) setPrefix("off");
+          if (action.startsWith("prefix-")) setPrefix(false);
+          if (action === "prefix-key:x") setConfirm(false);
           if (action === "prefix-key:[" || action.startsWith("copy-")) setScrollback("off");
           bell();
         },
@@ -137,9 +157,15 @@ async function finish(action, leadingActions = []) {
   const unsent = navigation ? await navigation.drain() : [];
   navigation?.close();
   writeFileSync(draftPath, input.getValue());
-  if (statePath) writeFileSync(statePath, JSON.stringify({ ...input.getState(), scrollback: scrollback !== "off", prefix: prefix !== "off" }));
+  if (statePath) writeFileSync(statePath, JSON.stringify({ ...input.getState(), scrollback: scrollback !== "off", prefix, confirm }));
   const actions = [...leadingActions, ...unsent, action];
   writeFileSync(actionPath, actions.map((name) => `${name}\n`).join(""));
+}
+
+// Send over the persistent channel, or let bash send it after this prompt.
+function sendRemote(action) {
+  if (navigation) navigation.send(action);
+  else finish(action);
 }
 
 input.onSubmit = () => finish("submit");
@@ -151,11 +177,10 @@ tui.addInputListener((data) => {
   // Kitty key releases match the same shortcuts as presses. The TUI already
   // drops them before the editor; never let them repeat a controller action.
   if (isKeyRelease(data)) return undefined;
-  if (prefix !== "off") {
+  if (prefix) {
     if (matchesKey(data, Key.escape)) {
-      setPrefix("off");
-      if (navigation) navigation.send("prefix-cancel");
-      else finish("prefix-cancel");
+      setPrefix(false);
+      sendRemote("prefix-cancel");
       return { consume: true };
     }
     const key = remoteKey(data);
@@ -163,32 +188,34 @@ tui.addInputListener((data) => {
       bell(); // A paste or unknown sequence is not one key. Keep the prefix.
       return { consume: true };
     }
-    setPrefix("off");
+    setPrefix(false);
     if (key === "[") setScrollback("pending");
-    if (navigation) navigation.send(`prefix-key:${key}`);
-    else finish(`prefix-key:${key}`);
+    if (key === "x") setConfirm(true);
+    sendRemote(`prefix-key:${key}`);
+    return { consume: true };
+  }
+  if (confirm) {
+    const key = matchingKey(data, [["y", "y"], ["n", "n"], [Key.escape, "Escape"]]);
+    if (key) {
+      setConfirm(false);
+      sendRemote(`send-key:${key}`);
+    } else bell(); // Keep the draft unchanged until tmux gets its answer.
     return { consume: true };
   }
   if (scrollback !== "off") {
-    const action = matchesKey(data, Key.ctrl("u")) ? "copy-up"
-      : matchesKey(data, Key.ctrl("d")) ? "copy-down"
-      : matchesKey(data, "q") ? "copy-quit"
-      : matchesKey(data, Key.pageUp) ? "copy-page-up"
-      : matchesKey(data, Key.pageDown) ? "copy-page-down" : undefined;
-    if (action) {
+    const key = remoteKey(data);
+    if (scrollbackKeys.has(key)) {
       // q returns control to the draft immediately; the remote command still
-      // runs in order and refuses to type q if the pane has left copy mode.
-      if (action === "copy-quit") setScrollback("off");
-      if (navigation) navigation.send(action);
-      else finish(action);
+      // runs in order and refuses to send q if the pane has left copy mode.
+      if (key === "q") setScrollback("off");
+      sendRemote(`copy-key:${key}`);
       return { consume: true };
     }
   }
   if (matchesKey(data, Key.ctrl("a"))) {
     if (navigationSessionId) {
-      setPrefix("pending");
-      if (navigation) navigation.send("prefix-start");
-      else finish("prefix-start");
+      setPrefix(true);
+      sendRemote("prefix-start");
     } else bell();
     return { consume: true };
   }
@@ -198,6 +225,12 @@ tui.addInputListener((data) => {
   }
   // A legacy terminal sends the same newline byte for Enter and Ctrl-J.
   if (data === "\n") return undefined;
+  const directKey = matchingKey(data, directKeys);
+  if (directKey) {
+    if (navigationSessionId) sendRemote(`send-key:${directKey}`);
+    else bell();
+    return { consume: true };
+  }
   if (matchesKey(data, Key.ctrl("c"))) {
     input.clear();
     tui.requestRender();

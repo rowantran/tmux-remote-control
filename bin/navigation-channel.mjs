@@ -7,6 +7,12 @@ export const CHANNEL_COMMAND = `sh -c 'echo ${READY_MARKER} && exec sh'`;
 
 const shellQuote = (text) => `'${text.replaceAll("'", "'\\''")}'`;
 
+/** Split a `KIND:KEY` action. The key itself may contain a colon. */
+function splitAction(action) {
+  const separator = action.indexOf(":");
+  return separator < 0 ? [action, ""] : [action.slice(0, separator), action.slice(separator + 1)];
+}
+
 /** Map a controller key action to a remote tmux command for one session. */
 export function navigationCommand(sessionId, action) {
   const session = shellQuote(sessionId);
@@ -23,16 +29,21 @@ export function navigationCommand(sessionId, action) {
   switch (action) {
     case "prefix-start": return `${keys("C-a")} && ${inPrefix}`;
     case "prefix-cancel": return `${client} && tmux switch-client -c "$client" -T root`;
-    case "copy-quit": return `${inCopyMode} && ${keys("q")}`;
-    case "copy-up": return `${inCopyMode} && ${keys("C-u")}`;
-    case "copy-down": return `${inCopyMode} && ${keys("C-d")}`;
-    case "copy-page-up": return `${inCopyMode} && ${keys("PageUp")}`;
-    case "copy-page-down": return `${inCopyMode} && ${keys("PageDown")}`;
     default: {
-      const key = action.startsWith("prefix-key:") ? action.slice("prefix-key:".length) : "";
+      const [kind, key] = splitAction(action);
       if (!key) return undefined;
-      const command = `${client} && ${inPrefix} && tmux send-keys -K -c "$client" ${shellQuote(key)}`;
-      return key === "[" ? `${command} && ${inCopyMode} && (${status} || :)` : command;
+      switch (kind) {
+        case "prefix-key": {
+          const command = `${client} && ${inPrefix} && tmux send-keys -K -c "$client" ${shellQuote(key)}`;
+          return key === "[" ? `${command} && ${inCopyMode} && (${status} || :)` : command;
+        }
+        // Never leak a scrollback key to the application after copy mode ends.
+        case "copy-key": return `${inCopyMode} && ${keys(key)}`;
+        // Unprefixed keys, such as Ctrl-H/J/K/L or an answer to a tmux
+        // confirmation prompt, go through the client's current key handling.
+        case "send-key": return keys(key);
+        default: return undefined;
+      }
     }
   }
 }

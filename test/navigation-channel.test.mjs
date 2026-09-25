@@ -56,9 +56,16 @@ test("maps every controller action to a quoted tmux command", () => {
   assert.ok(navigationCommand("$3", "prefix-key:[").includes("status-right \"$current#{?#{==:#{pane_mode},copy-mode}, [scrollback],}\""));
   assert.equal(navigationCommand("$3", "prefix-key:C-n"), `${client} && ${prefix} && tmux send-keys -K -c "$client" 'C-n'`);
   assert.equal(navigationCommand("$3", "prefix-key:;"), `${client} && ${prefix} && tmux send-keys -K -c "$client" ';'`);
-  for (const [action, key] of [["copy-quit", "q"], ["copy-up", "C-u"], ["copy-down", "C-d"], ["copy-page-up", "PageUp"], ["copy-page-down", "PageDown"]]) {
-    assert.equal(navigationCommand("$3", action), `${mode} && ${send(key)}`);
+  for (const key of ["q", "v", "h", "j", "k", "l", "Enter", "C-u", "C-d", "PageUp", "PageDown"]) {
+    assert.equal(navigationCommand("$3", `copy-key:${key}`), `${mode} && ${send(key)}`);
   }
+  for (const key of ["C-h", "C-j", "C-k", "C-l", "y", "n", "Escape"]) {
+    assert.equal(navigationCommand("$3", `send-key:${key}`), send(key));
+  }
+  assert.equal(navigationCommand("$3", "send-key:'"), `${client} && tmux send-keys -K -c "$client" ''\\'''`);
+  assert.equal(navigationCommand("$3", "copy-key:"), undefined);
+  assert.equal(navigationCommand("$3", "send-key:"), undefined);
+  assert.equal(navigationCommand("$3", "other-key:q"), undefined);
   assert.ok(navigationCommand("it's", "prefix-key:[").includes("-t 'it'\\''s'"));
   assert.equal(navigationCommand("$3", "editor"), undefined);
   assert.equal(navigationCommand("$3", "prefix-key:"), undefined);
@@ -87,10 +94,10 @@ test("writes commands only after the remote shell is ready, then in order", asyn
   assert.deepEqual(commands(child), [navigationCommand("$3", "prefix-start"), navigationCommand("$3", "prefix-key:C-n")]);
   assert.match(child.written, new RegExp(`; echo "${STATUS_MARKER} \\$\\?"\\n$`));
   nav.send("prefix-key:[");
-  nav.send("copy-page-up");
+  nav.send("copy-key:PageUp");
   await tick();
   assert.equal(commands(child).at(-2), navigationCommand("$3", "prefix-key:["));
-  assert.equal(commands(child).at(-1), navigationCommand("$3", "copy-page-up"));
+  assert.equal(commands(child).at(-1), navigationCommand("$3", "copy-key:PageUp"));
   assert.equal(ssh.children.length, 1, "one channel serves every key");
 });
 
@@ -124,7 +131,7 @@ test("confirms copy-mode only after the remote status succeeds", async () => {
     onFailure: (action) => failures.push(action),
   });
   nav.send("prefix-key:[");
-  nav.send("copy-up");
+  nav.send("copy-key:C-u");
   const [child] = ssh.children;
   child.reply(READY_MARKER);
   await tick();
@@ -133,7 +140,7 @@ test("confirms copy-mode only after the remote status succeeds", async () => {
   child.reply(`${STATUS_MARKER} 1`);
   await tick();
   assert.deepEqual(successes, ["prefix-key:["]);
-  assert.deepEqual(failures, ["copy-up"]);
+  assert.deepEqual(failures, ["copy-key:C-u"]);
 });
 
 test("reports failed commands without resending them", async () => {

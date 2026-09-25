@@ -57,9 +57,12 @@ At the inline prompt:
   Ctrl-G              Edit the current draft externally, then return without submitting
   Ctrl-A              Send the remote tmux prefix; the next key goes to tmux
   Esc after Ctrl-A    Cancel the prefix locally and remotely
+  Ctrl-H/J/K/L        Send the key to remote tmux without the prefix
+  Ctrl-A, x           Kill-pane confirmation: y / n / Esc goes to tmux
   Ctrl-A, [           Enter tmux copy mode (scrollback)
   q / Ctrl-U / Ctrl-D  In scrollback: quit / half-page up / half-page down
   PageUp / PageDown   In scrollback: page up / page down
+  v hjkl bwe0$ Enter  In scrollback: send the key to tmux copy mode
   Ctrl-C              Clear the current draft
   Ctrl-D              Exit outside scrollback controls
 EOF
@@ -446,7 +449,7 @@ run_navigation_action() {
   fi
 
   case "$key_action" in
-    prefix-start|prefix-cancel|prefix-key:*|copy-*)
+    prefix-start|prefix-cancel|prefix-key:*|copy-key:*|send-key:*)
       local key="" client_command="" mode_check="" prefix_check=""
       client_command="client=\$(tmux list-clients -t $(shell_quote "$session_id") -F '#{client_tty}' | head -n 1) && test -n \"\$client\""
       prefix_check="test \"\$(tmux display-message -p -c \"\$client\" '#{client_key_table}')\" = prefix"
@@ -464,16 +467,15 @@ run_navigation_action() {
             navigation_command="$navigation_command && $mode_check && ($status_command || :)"
           fi
           ;;
-        copy-*)
-          case "$key_action" in
-            copy-quit) key=q ;;
-            copy-up) key=C-u ;;
-            copy-down) key=C-d ;;
-            copy-page-up) key=PageUp ;;
-            copy-page-down) key=PageDown ;;
-            *) die "internal error: unknown key action $key_action" ;;
-          esac
+        copy-key:*)
+          key="${key_action#copy-key:}"
+          [[ -n "$key" ]] || die 'internal error: empty scrollback key'
           navigation_command="$mode_check && $client_command && tmux send-keys -K -c \"\$client\" $(shell_quote "$key")"
+          ;;
+        send-key:*)
+          key="${key_action#send-key:}"
+          [[ -n "$key" ]] || die 'internal error: empty remote key'
+          navigation_command="$client_command && tmux send-keys -K -c \"\$client\" $(shell_quote "$key")"
           ;;
       esac
       # SSH asks the login shell to parse its command; use POSIX sh for
@@ -489,7 +491,7 @@ run_navigation_action() {
     # The helper stopped before interactive SSH. Keep its saved key mode in
     # sync if the fallback could not enter (or remain in) copy mode.
     if [[ "$key_action" == copy-* || "$key_action" == prefix-* ]]; then
-      node -e 'const fs = require("node:fs"); const file = process.argv[1]; const action = process.argv[2]; const state = JSON.parse(fs.readFileSync(file, "utf8")); if (action.startsWith("prefix-")) state.prefix = false; if (action === "prefix-key:[" || action.startsWith("copy-")) state.scrollback = false; fs.writeFileSync(file, JSON.stringify(state));' "$prompt_state_file" "$key_action" || true
+      node -e 'const fs = require("node:fs"); const file = process.argv[1]; const action = process.argv[2]; const state = JSON.parse(fs.readFileSync(file, "utf8")); if (action.startsWith("prefix-")) state.prefix = false; if (action === "prefix-key:x") state.confirm = false; if (action === "prefix-key:[" || action.startsWith("copy-")) state.scrollback = false; fs.writeFileSync(file, JSON.stringify(state));' "$prompt_state_file" "$key_action" || true
     fi
     printf 'tmux-remote-control: remote navigation failed\n' >&2
   fi
@@ -518,7 +520,7 @@ while :; do
     while IFS= read -r next_action; do
       if [[ -n "$prompt_action" ]]; then
         case "$prompt_action" in
-          prefix-*|copy-*) run_navigation_action "$prompt_action" ;;
+          prefix-*|copy-key:*|send-key:*) run_navigation_action "$prompt_action" ;;
           *) die "inline prompt returned an unexpected action: $prompt_action" ;;
         esac
       fi
@@ -542,7 +544,7 @@ while :; do
       exit)
         exit 0
         ;;
-      prefix-*|copy-*)
+      prefix-*|copy-key:*|send-key:*)
         run_navigation_action "$prompt_action"
         ;;
       *)
