@@ -59,11 +59,12 @@ At the inline prompt:
   Ctrl-H/J/K/L        Select the remote pane down/left/right/up
   Ctrl-P / Ctrl-N     Select the previous/next remote window
   Ctrl-0 ... Ctrl-9   Select a remote window by index
-  Ctrl-[              Send the remote tmux prefix, then Ctrl-[ (requires distinct key encoding)
+  Ctrl-[              Enter scrollback controls if prefix Ctrl-[ opens tmux copy mode
+  q / Ctrl-U / Ctrl-D  In scrollback: quit / half-page up / half-page down
   Ctrl-V / Ctrl-Z     Send the remote tmux prefix, then Ctrl-V / Ctrl-Z
   PageUp / PageDown   Send the key to the remote tmux client immediately
   Ctrl-C              Clear the current draft
-  Ctrl-D              Exit
+  Ctrl-D              Exit outside scrollback controls
 EOF
 }
 
@@ -455,22 +456,32 @@ run_navigation_action() {
     pane-up) navigation_command="tmux select-pane -t $(shell_quote "$session_id") -U" ;;
     window-previous) navigation_command="tmux select-window -t $(shell_quote "$session_id") -p" ;;
     window-next) navigation_command="tmux select-window -t $(shell_quote "$session_id") -n" ;;
-    copy-mode|split-vertical|split-horizontal|page-up|page-down)
-      local key="" prefix="" client_command=""
+    copy-mode|copy-quit|copy-up|copy-down|split-vertical|split-horizontal|page-up|page-down)
+      local key="" prefix="" client_command="" mode_check=""
       case "$key_action" in
         copy-mode) key='C-['; prefix=true ;;
+        copy-quit) key='q' ;;
+        copy-up) key='C-u' ;;
+        copy-down) key='C-d' ;;
         split-vertical) key='C-v'; prefix=true ;;
         split-horizontal) key='C-z'; prefix=true ;;
         page-up) key='PageUp' ;;
         page-down) key='PageDown' ;;
       esac
+      mode_check="test \"\$(tmux display-message -p -t $(shell_quote "$session_id") '#{pane_mode}')\" = copy-mode"
       client_command="client=\$(tmux list-clients -t $(shell_quote "$session_id") -F '#{client_tty}' | head -n 1) && test -n \"\$client\" && tmux send-keys -K -c \"\$client\""
       if [[ -n "$prefix" ]]; then
         client_command="$client_command \"\$(tmux show-options -v -t $(shell_quote "$session_id") prefix)\""
       fi
+      navigation_command="$client_command $(shell_quote "$key")"
+      if [[ "$key_action" == copy-mode ]]; then
+        navigation_command="$navigation_command && $mode_check"
+      elif [[ "$key_action" == copy-* ]]; then
+        navigation_command="$mode_check && $navigation_command"
+      fi
       # SSH asks the login shell to parse its command; use POSIX sh for
       # substitutions and assignments, including on Fish/Nushell accounts.
-      navigation_command="sh -c $(shell_quote "$client_command $(shell_quote "$key")")"
+      navigation_command="sh -c $(shell_quote "$navigation_command")"
       ;;
     window-[0-9])
       navigation_command="tmux select-window -t $(shell_quote "$session_id:${key_action#window-}")"
@@ -481,6 +492,11 @@ run_navigation_action() {
   esac
 
   if ! ssh "${ssh_args[@]}" -T "$host" "$navigation_command" </dev/null; then
+    # The helper stopped before interactive SSH. Keep its saved key mode in
+    # sync if the fallback could not enter (or remain in) copy mode.
+    if [[ "$key_action" == copy-* && -n "$prompt_state_file" ]]; then
+      node -e 'const fs = require("node:fs"); const file = process.argv[1]; const state = JSON.parse(fs.readFileSync(file, "utf8")); state.scrollback = false; fs.writeFileSync(file, JSON.stringify(state));' "$prompt_state_file" || true
+    fi
     printf 'tmux-remote-control: remote navigation failed\n' >&2
   fi
 }
@@ -508,7 +524,7 @@ while :; do
     while IFS= read -r next_action; do
       if [[ -n "$prompt_action" ]]; then
         case "$prompt_action" in
-          pane-*|window-*|copy-mode|split-*|page-*) run_navigation_action "$prompt_action" ;;
+          pane-*|window-*|copy-*|split-*|page-*) run_navigation_action "$prompt_action" ;;
           *) die "inline prompt returned an unexpected action: $prompt_action" ;;
         esac
       fi
@@ -532,7 +548,7 @@ while :; do
       exit)
         exit 0
         ;;
-      pane-*|window-*|copy-mode|split-*|page-*)
+      pane-*|window-*|copy-*|split-*|page-*)
         run_navigation_action "$prompt_action"
         ;;
       *)

@@ -55,6 +55,13 @@ const input = new HistoryInput(
   state,
 );
 let finished = false;
+// The remote check confirms entry; keep pending keys routed to tmux while
+// that check is in flight. Saved state survives history/editor prompt restarts.
+let scrollback = state.scrollback === true ? "on" : "off";
+const setScrollback = (value) => {
+  scrollback = value;
+  tui.requestRender();
+};
 
 const colorsEnabled = !("NO_COLOR" in process.env);
 const color = (red, green, blue, text) =>
@@ -74,7 +81,8 @@ class ControllerPrompt {
       `📡  ${muted("Controlling: ")}` +
       hostColor(controllerHost) +
       muted(" → ") +
-      targetColor(controllerTarget);
+      targetColor(controllerTarget) +
+      (scrollback === "off" ? "" : `${muted("  · ")}${targetColor(scrollback === "pending" ? "checking scrollback" : "scrollback keys: q, Ctrl-U, Ctrl-D")}`);
     const content = [truncateToWidth(status, safeWidth), ...this.input.render(safeWidth)];
     const topPadding = Math.max(0, terminal.rows - content.length);
     return [...Array(topPadding).fill(""), ...content];
@@ -96,7 +104,13 @@ const navigation =
         host: controllerHost,
         sessionId: navigationSessionId,
         sshOptions: ["-o", "ControlMaster=auto", "-o", "ControlPersist=10m", "-o", `ControlPath=${controlPath}`],
-        onFailure: bell,
+        onSuccess: (action) => {
+          if (action === "copy-mode" && scrollback === "pending") setScrollback("on");
+        },
+        onFailure: (action) => {
+          if (action === "copy-mode" || action.startsWith("copy-")) setScrollback("off");
+          bell();
+        },
         // The channel could not start, so no queued key reached the remote
         // shell. Let bash run them in order through interactive SSH instead.
         onFallback: (queued) => finish(queued.at(-1), queued.slice(0, -1)),
@@ -114,7 +128,7 @@ async function finish(action, leadingActions = []) {
   const unsent = navigation ? await navigation.drain() : [];
   navigation?.close();
   writeFileSync(draftPath, input.getValue());
-  if (statePath) writeFileSync(statePath, JSON.stringify(input.getState()));
+  if (statePath) writeFileSync(statePath, JSON.stringify({ ...input.getState(), scrollback: scrollback !== "off" }));
   const actions = [...leadingActions, ...unsent, action];
   writeFileSync(actionPath, actions.map((name) => `${name}\n`).join(""));
 }
@@ -145,6 +159,19 @@ tui.addInputListener((data) => {
   // Kitty key releases match the same shortcuts as presses. The TUI already
   // drops them before the editor; never let them repeat a controller action.
   if (isKeyRelease(data)) return undefined;
+  if (scrollback !== "off") {
+    const action = matchesKey(data, Key.ctrl("u")) ? "copy-up"
+      : matchesKey(data, Key.ctrl("d")) ? "copy-down"
+      : matchesKey(data, "q") ? "copy-quit" : undefined;
+    if (action) {
+      // q returns control to the draft immediately; the remote command still
+      // runs in order and refuses to type q if the pane has left copy mode.
+      if (action === "copy-quit") setScrollback("off");
+      if (navigation) navigation.send(action);
+      else finish(action);
+      return { consume: true };
+    }
+  }
   if (isHistoryShortcut(data, input.getValue())) {
     finish("history");
     return { consume: true };
@@ -165,6 +192,7 @@ tui.addInputListener((data) => {
     // existing history/editor behavior; only forward an unambiguous Ctrl-[.
     if (action === "copy-mode" && data === "\x1b") continue;
     if (matchesKey(data, key)) {
+      if (action === "copy-mode" && navigationSessionId) setScrollback("pending");
       if (navigation && action !== "editor") navigation.send(action);
       else if (action !== "editor" && controlPath && !navigationSessionId) bell();
       else finish(action);

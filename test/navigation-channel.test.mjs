@@ -55,7 +55,11 @@ test("maps every controller action to a quoted tmux command", () => {
   assert.equal(navigationCommand("$3", "window-next"), "tmux select-window -t '$3' -n");
   assert.equal(navigationCommand("$3", "window-7"), "tmux select-window -t '$3:7'");
   const client = `client=$(tmux list-clients -t '$3' -F '#{client_tty}' | head -n 1) && test -n "$client" && tmux send-keys -K -c "$client"`;
-  assert.equal(navigationCommand("$3", "copy-mode"), `${client} "$(tmux show-options -v -t '$3' prefix)" 'C-['`);
+  const mode = `test "$(tmux display-message -p -t '$3' '#{pane_mode}')" = copy-mode`;
+  assert.equal(navigationCommand("$3", "copy-mode"), `${client} "$(tmux show-options -v -t '$3' prefix)" 'C-[' && ${mode}`);
+  assert.equal(navigationCommand("$3", "copy-quit"), `${mode} && ${client} 'q'`);
+  assert.equal(navigationCommand("$3", "copy-up"), `${mode} && ${client} 'C-u'`);
+  assert.equal(navigationCommand("$3", "copy-down"), `${mode} && ${client} 'C-d'`);
   assert.equal(navigationCommand("$3", "split-vertical"), `${client} "$(tmux show-options -v -t '$3' prefix)" 'C-v'`);
   assert.equal(navigationCommand("$3", "split-horizontal"), `${client} "$(tmux show-options -v -t '$3' prefix)" 'C-z'`);
   assert.equal(navigationCommand("$3", "page-up"), `${client} 'PageUp'`);
@@ -116,6 +120,27 @@ test("drain waits for confirmation of every sent command", async () => {
   child.reply(`${STATUS_MARKER} 0`);
   await tick();
   assert.deepEqual(drained, []);
+});
+
+test("confirms copy-mode only after the remote status succeeds", async () => {
+  const ssh = fakeSsh();
+  const successes = [];
+  const failures = [];
+  const nav = channel(ssh, {
+    onSuccess: (action) => successes.push(action),
+    onFailure: (action) => failures.push(action),
+  });
+  nav.send("copy-mode");
+  nav.send("copy-up");
+  const [child] = ssh.children;
+  child.reply(READY_MARKER);
+  await tick();
+  assert.deepEqual(successes, []);
+  child.reply(`${STATUS_MARKER} 0`);
+  child.reply(`${STATUS_MARKER} 1`);
+  await tick();
+  assert.deepEqual(successes, ["copy-mode"]);
+  assert.deepEqual(failures, ["copy-up"]);
 });
 
 test("reports failed commands without resending them", async () => {

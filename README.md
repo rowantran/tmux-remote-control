@@ -263,11 +263,14 @@ Controls:
 - `Ctrl-L`: select the pane above
 - `Ctrl-P` / `Ctrl-N`: select the previous or next window
 - `Ctrl-0` through `Ctrl-9`: select a window by index
-- `Ctrl-[`: send the remote tmux prefix followed by `Ctrl-[` (enter copy/scrollback mode if bound there)
+- `Ctrl-[`: send the remote tmux prefix followed by `Ctrl-[`; if it enters tmux copy mode, enable scrollback controls
+- `q` / `Ctrl-U` / `Ctrl-D` while scrollback controls are active: send unprefixed `q` / `Ctrl-U` / `Ctrl-D` to tmux (quit / half-page up / half-page down)
 - `Ctrl-V` / `Ctrl-Z`: send the remote tmux prefix followed by `Ctrl-V` / `Ctrl-Z` (for your split bindings)
 - `PageUp` / `PageDown`: send the unprefixed key to the remote tmux client, including in copy mode
 - `Ctrl-C`: discard the current draft and show a clean prompt
-- `Ctrl-D`: close the controller, even when the current draft is not empty
+- `Ctrl-D`: close the controller when scrollback controls are inactive, even with a nonempty draft
+
+Scrollback controls appear in the prompt status only after tmux confirms that prefixed `Ctrl-[` entered copy mode. They keep your draft unchanged; `q` exits copy mode and restores normal prompt keys. If you leave copy mode from the attached terminal, the next scrollback shortcut checks tmux before forwarding; if copy mode has closed, the controller rings the bell and restores normal prompt keys without sending that key to the remote application. If the tmux binding fails or is not bound to copy mode, scrollback controls do not activate. The mode survives a return from the external editor or history picker.
 
 The controller shortcuts take precedence when they overlap a standard editing key. Remote shortcuts work when the controller follows a session; prefixed keys and PageUp/PageDown also need an attached tmux client. They keep the current draft and cursor position at the prompt, and the prompt stays open. Prefix shortcuts use the session's configured prefix and the attached client's tmux key bindings; PageUp and PageDown use that client's current key table, including copy mode. Each key is sent at once over a persistent channel to a remote POSIX shell (see [Connection behavior](#connection-behavior)), so its latency is close to a tmux key binding in the attached terminal. If you press Enter or another prompt action right after a shortcut, the controller waits until the remote tmux server confirms the shortcut, so the submission reaches the newly selected pane. A failed shortcut rings the terminal bell. Fixed-pane mode ignores them and rings the terminal bell because that mode stays pinned to one pane.
 

@@ -68,6 +68,17 @@ cat >"$root/fake-tmux/tmux" <<'SH'
 case "$1" in
   list-clients) printf '/dev/pts/fake\n'; exit ;;
   show-options) printf 'C-a\n'; exit ;;
+  display-message)
+    if [ -f "$TMUX_REMOTE_CONTROL_TEST_COPY_MODE_FILE" ]; then printf 'copy-mode\n'; fi
+    exit ;;
+  send-keys)
+    for key do :; done
+    if [ "$key" = 'C-[' ] && [ "${TMUX_REMOTE_CONTROL_TEST_COPY_MODE_DISABLED:-}" != 1 ]; then
+      touch "$TMUX_REMOTE_CONTROL_TEST_COPY_MODE_FILE"
+    elif [ "$key" = q ] || { [ "$key" = PageDown ] && [ "${TMUX_REMOTE_CONTROL_TEST_COPY_MODE_DROP_ON_PAGE:-}" = 1 ]; }; then
+      rm -f "$TMUX_REMOTE_CONTROL_TEST_COPY_MODE_FILE"
+    fi
+    ;;
 esac
 printf 'channel: tmux %s\n' "$*" >>"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
 SH
@@ -102,6 +113,7 @@ export TMUX_REMOTE_CONTROL_TEST_SSH_ARGS="$root/ssh-args"
 export TMUX_REMOTE_CONTROL_TEST_QUERY_COMMAND="$root/query-command"
 export TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS="$root/navigation-commands"
 export TMUX_REMOTE_CONTROL_TEST_FAKE_TMUX_DIR="$root/fake-tmux"
+export TMUX_REMOTE_CONTROL_TEST_COPY_MODE_FILE="$root/copy-mode"
 
 project_root="$(cd "$(dirname "$0")/.." && pwd)"
 script="$project_root/bin/tmux-remote-control"
@@ -263,6 +275,8 @@ TMUX_REMOTE_CONTROL_SESSION=work "$script" attach example-host --list >/dev/null
 run_in_pty() {
   TMUX_REMOTE_CONTROL_TEST_KEYS="$1" \
     TMUX_REMOTE_CONTROL_TEST_KEYS_AFTER_PROMPT="${2:-}" \
+    TMUX_REMOTE_CONTROL_TEST_KEYS_AFTER_SCROLLBACK="${3:-}" \
+    TMUX_REMOTE_CONTROL_TEST_KEYS_AFTER_BELL="${4:-}" \
     python3 - "$script" <<'PY'
 import fcntl
 import os
@@ -277,7 +291,8 @@ import time
 script = sys.argv[1]
 pid, fd = pty.fork()
 if pid == 0:
-    os.execve(script, [script, "attach", "example-host", "--session", "%7", "--once"], os.environ)
+    mode = "--target" if os.environ.get("TMUX_REMOTE_CONTROL_TEST_FIXED") == "1" else "--session"
+    os.execve(script, [script, "attach", "example-host", mode, "%7", "--once"], os.environ)
 
 output = bytearray()
 deadline = time.monotonic() + 10
@@ -285,6 +300,10 @@ sent = False
 resized = False
 after_prompt_keys = os.environ["TMUX_REMOTE_CONTROL_TEST_KEYS_AFTER_PROMPT"]
 sent_after_prompt = not after_prompt_keys
+after_scrollback_keys = os.environ["TMUX_REMOTE_CONTROL_TEST_KEYS_AFTER_SCROLLBACK"]
+sent_after_scrollback = not after_scrollback_keys
+after_bell_keys = os.environ["TMUX_REMOTE_CONTROL_TEST_KEYS_AFTER_BELL"]
+sent_after_bell = not after_bell_keys
 keyboard_marker_prefix = b"\x1b[>"
 clear_screen = b"\x1b[2J\x1b[H"
 
@@ -329,6 +348,14 @@ while time.monotonic() < deadline:
         elif sent and not sent_after_prompt and prompts >= 2:
             os.write(fd, bytes.fromhex(after_prompt_keys))
             sent_after_prompt = True
+        if sent and not sent_after_scrollback and b"scrollback keys:" in output:
+            os.write(fd, bytes.fromhex(after_scrollback_keys))
+            sent_after_scrollback = True
+        # OSC 8 terminal sequences also end in BEL; wait for an actual alert.
+        without_osc = __import__("re").sub(rb"\x1b\][^\x07]*\x07", b"", output)
+        if sent and not sent_after_bell and b"\x07" in without_osc:
+            os.write(fd, bytes.fromhex(after_bell_keys))
+            sent_after_bell = True
     finished, status = os.waitpid(pid, os.WNOHANG)
     if finished:
         if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
@@ -340,15 +367,16 @@ else:
     sys.stderr.buffer.write(output)
     raise SystemExit("timed out waiting for tmux-remote-control")
 
-if not resized or not sent or not sent_after_prompt:
+if not resized or not sent or not sent_after_prompt or not sent_after_scrollback or not sent_after_bell:
     sys.stderr.buffer.write(output)
-    raise SystemExit("expected resized inline prompt was not displayed")
+    raise SystemExit(f"expected prompt/key stages (resized={resized}, initial={sent}, next_prompt={sent_after_prompt}, scrollback={sent_after_scrollback}, bell={sent_after_bell})")
 last_clear = output.rfind(clear_screen)
 section = bytes(output[last_clear:])
 # Remove ANSI control sequences so colored text can be checked as one line.
 plain_section = __import__("re").sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", section)
 plain_section = plain_section.replace(b"\x1b_pi:c\x07", b"")
-header = "📡  Controlling: example-host → work".encode("utf-8")
+target = "work:0.0" if os.environ.get("TMUX_REMOTE_CONTROL_TEST_FIXED") == "1" else "work"
+header = f"📡  Controlling: example-host → {target}".encode("utf-8")
 prompt = "› ".encode("utf-8")
 if last_clear < 0 or header not in plain_section or plain_section.find(header) > plain_section.find(prompt):
     sys.stderr.buffer.write(output)
@@ -364,7 +392,7 @@ if status_row < 0 or frame_end != rows - 1:
 if not rendered_lines[status_row + 1].startswith(border) or not rendered_lines[status_row + 2].startswith(prompt):
     sys.stderr.buffer.write(output)
     raise SystemExit("controller prompt frame was not rendered in the expected order")
-if b"\x1b[38;2;142;192;124mexample-host\x1b[39m" not in section or b"\x1b[38;2;250;189;47mwork\x1b[39m" not in section:
+if b"\x1b[38;2;142;192;124mexample-host\x1b[39m" not in section or b"\x1b[38;2;250;189;47m" + target.encode() + b"\x1b[39m" not in section:
     sys.stderr.buffer.write(output)
     raise SystemExit("controller host and target colors were not rendered")
 if b"\r\x1b[2K" not in output:
@@ -396,6 +424,9 @@ printf 'not submitted' >"$root/input"
 run_in_pty "647261667404"
 [[ "$(cat "$root/input")" == "not submitted" ]]
 run_in_pty "64726166741b5b3130303b3575"
+[[ "$(cat "$root/input")" == "not submitted" ]]
+# Fixed-pane mode must not arm scrollback forwarding when Ctrl-[ is ignored.
+TMUX_REMOTE_CONTROL_TEST_FIXED=1 run_in_pty "64726166741b5b39313b357504"
 [[ "$(cat "$root/input")" == "not submitted" ]]
 
 # The Pi TUI input component handles standard terminal word editing.
@@ -460,6 +491,71 @@ diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATI
 TMUX_REMOTE_CONTROL_TEST_CHANNEL_FAIL=1 run_in_pty "6b65657020746869732064726166741b5b39313b35750d"
 [[ "$(cat "$root/input")" == "keep this draft" ]]
 printf 'channel: tmux send-keys -K -c /dev/pts/fake C-a C-[\nsubmit\n' >"$root/expected-navigation-commands"
+diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+
+# q typed immediately after Ctrl-[ is queued for tmux even before confirmation.
+rm -f "$TMUX_REMOTE_CONTROL_TEST_COPY_MODE_FILE"
+: >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+run_in_pty "64726166741b5b39313b3575716f6b0d"
+[[ "$(cat "$root/input")" == "draftok" ]]
+[[ ! -e "$TMUX_REMOTE_CONTROL_TEST_COPY_MODE_FILE" ]]
+{
+  printf 'channel: tmux send-keys -K -c /dev/pts/fake %s\n' 'C-a C-[' 'q'
+  printf 'submit\n'
+} >"$root/expected-navigation-commands"
+diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+
+# Enter copy mode only after the remote pane confirms it. Ctrl-U/D and q go
+# straight to tmux, even with a nonempty draft; q restores normal typing.
+rm -f "$TMUX_REMOTE_CONTROL_TEST_COPY_MODE_FILE"
+: >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+run_in_pty "6b65657020746869732064726166741b5b39313b3575" "" "1b5b3131373b35751b5b3130303b3575716f6b0d"
+[[ "$(cat "$root/input")" == "keep this draftok" ]]
+[[ ! -e "$TMUX_REMOTE_CONTROL_TEST_COPY_MODE_FILE" ]]
+{
+  printf 'channel: tmux send-keys -K -c /dev/pts/fake %s\n' 'C-a C-[' 'C-u' 'C-d' 'q'
+  printf 'submit\n'
+} >"$root/expected-navigation-commands"
+diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+
+# The controller remembers copy mode across an external-editor return.
+rm -f "$TMUX_REMOTE_CONTROL_TEST_COPY_MODE_FILE"
+: >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+run_in_pty "64726166741b5b39313b357507" "716f6b0d"
+[[ "$(cat "$root/input")" == $'first line\nsecond lineok' ]]
+{
+  printf 'channel: tmux send-keys -K -c /dev/pts/fake %s\n' 'C-a C-[' 'q'
+  printf 'submit\n'
+} >"$root/expected-navigation-commands"
+diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+
+# A prefix binding that does not enter copy mode leaves the prompt unchanged.
+: >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+TMUX_REMOTE_CONTROL_TEST_COPY_MODE_DISABLED=1 run_in_pty "64726166741b5b39313b3575" "" "" "710d"
+[[ "$(cat "$root/input")" == "draftq" ]]
+printf 'channel: tmux send-keys -K -c /dev/pts/fake C-a C-[\nsubmit\n' >"$root/expected-navigation-commands"
+diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+
+# Failed copy-mode activation on the interactive SSH fallback also clears
+# the saved mode before the next prompt; q must edit the draft normally.
+rm -f "$TMUX_REMOTE_CONTROL_TEST_COPY_MODE_FILE"
+: >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+TMUX_REMOTE_CONTROL_TEST_CHANNEL_FAIL=1 TMUX_REMOTE_CONTROL_TEST_COPY_MODE_DISABLED=1 \
+  run_in_pty "64726166741b5b39313b3575" "710d"
+[[ "$(cat "$root/input")" == "draftq" ]]
+printf 'channel: tmux send-keys -K -c /dev/pts/fake C-a C-[\nsubmit\n' >"$root/expected-navigation-commands"
+diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+
+# The remote view can leave copy mode independently. Never leak q to the app;
+# after the failed remote check, q types into the local draft again.
+: >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+TMUX_REMOTE_CONTROL_TEST_COPY_MODE_DROP_ON_PAGE=1 \
+  run_in_pty "64726166741b5b39313b3575" "" "1b5b367e71" "710d"
+[[ "$(cat "$root/input")" == "draftq" ]]
+{
+  printf 'channel: tmux send-keys -K -c /dev/pts/fake %s\n' 'C-a C-[' 'PageDown'
+  printf 'submit\n'
+} >"$root/expected-navigation-commands"
 diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
 
 # Kitty key releases match the same shortcut. They must not navigate again.

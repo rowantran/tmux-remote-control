@@ -15,6 +15,7 @@ export function navigationCommand(sessionId, action) {
   const client = `client=$(tmux list-clients -t ${session} -F '#{client_tty}' | head -n 1) && test -n "$client"`;
   const keys = (key, prefixed = false) =>
     `${client} && tmux send-keys -K -c "$client" ${prefixed ? `"$(tmux show-options -v -t ${session} prefix)" ` : ""}${shellQuote(key)}`;
+  const inCopyMode = `test "$(tmux display-message -p -t ${session} '#{pane_mode}')" = copy-mode`;
   switch (action) {
     case "pane-zoom": return `tmux resize-pane -Z -t ${session}`;
     case "pane-down": return `tmux select-pane -t ${session} -D`;
@@ -23,7 +24,10 @@ export function navigationCommand(sessionId, action) {
     case "pane-up": return `tmux select-pane -t ${session} -U`;
     case "window-previous": return `tmux select-window -t ${session} -p`;
     case "window-next": return `tmux select-window -t ${session} -n`;
-    case "copy-mode": return keys("C-[", true);
+    case "copy-mode": return `${keys("C-[", true)} && ${inCopyMode}`;
+    case "copy-quit": return `${inCopyMode} && ${keys("q")}`;
+    case "copy-up": return `${inCopyMode} && ${keys("C-u")}`;
+    case "copy-down": return `${inCopyMode} && ${keys("C-d")}`;
     case "split-vertical": return keys("C-v", true);
     case "split-horizontal": return keys("C-z", true);
     case "page-up": return keys("PageUp");
@@ -45,11 +49,12 @@ export function navigationCommand(sessionId, action) {
  * actions are handed back through `onFallback` for the interactive SSH path.
  */
 export class NavigationChannel {
-  constructor({ host, sessionId, sshOptions = [], spawnProcess = spawn, onFailure = () => {}, onFallback = () => {} }) {
+  constructor({ host, sessionId, sshOptions = [], spawnProcess = spawn, onSuccess = () => {}, onFailure = () => {}, onFallback = () => {} }) {
     this.host = host;
     this.sessionId = sessionId;
     this.sshOptions = sshOptions;
     this.spawnProcess = spawnProcess;
+    this.onSuccess = onSuccess;
     this.onFailure = onFailure;
     this.onFallback = onFallback;
     this.child = undefined;
@@ -146,7 +151,10 @@ export class NavigationChannel {
         }
       } else if (line.startsWith(`${STATUS_MARKER} `)) {
         const entry = this.sent.shift();
-        if (entry && line !== `${STATUS_MARKER} 0`) this.onFailure(entry.action);
+        if (entry) {
+          if (line === `${STATUS_MARKER} 0`) this.onSuccess(entry.action);
+          else this.onFailure(entry.action);
+        }
       }
     }
     this.#notifyIdle();
