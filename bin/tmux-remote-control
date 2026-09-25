@@ -476,11 +476,25 @@ while :; do
   while :; do
     resize_local_window compact
     : >"$prompt_action_file"
-    node "$prompt_helper" "$prompt_file" "$prompt_action_file" "$host" "$controller_target" "$session_name" "$prompt_state_file" </dev/tty >/dev/tty || \
+    # The prompt sends navigation keys itself over a persistent channel that
+    # shares this SSH control connection. It returns only other actions.
+    node "$prompt_helper" "$prompt_file" "$prompt_action_file" "$host" "$controller_target" "$session_name" "$prompt_state_file" "$control_path" "$session_id" </dev/tty >/dev/tty || \
       die "inline prompt exited unsuccessfully"
     printf '\r\033[2K' >/dev/tty
-    IFS= read -r prompt_action <"$prompt_action_file" || \
-      die "inline prompt returned no action"
+    # Earlier lines are navigation keys that the prompt could not send, for
+    # example when SSH needs interactive authentication. Run them in order
+    # before the final action so a submission reaches the intended pane.
+    prompt_action=""
+    while IFS= read -r next_action; do
+      if [[ -n "$prompt_action" ]]; then
+        case "$prompt_action" in
+          pane-*|window-*) run_navigation_action "$prompt_action" ;;
+          *) die "inline prompt returned an unexpected action: $prompt_action" ;;
+        esac
+      fi
+      prompt_action="$next_action"
+    done <"$prompt_action_file"
+    [[ -n "$prompt_action" ]] || die "inline prompt returned no action"
 
     case "$prompt_action" in
       submit)

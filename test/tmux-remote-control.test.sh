@@ -24,6 +24,12 @@ if [[ -n "${TMUX_REMOTE_CONTROL_TEST_SSH_ARGS:-}" ]]; then
   printf '%s\n' "$@" >"$TMUX_REMOTE_CONTROL_TEST_SSH_ARGS"
 fi
 command="${!#}"
+if [[ "$command" == *"tmux-remote-control-ready"* ]]; then
+  # The prompt's persistent navigation channel. Run the real remote command
+  # with POSIX sh, and a tmux stub that logs its arguments.
+  [[ "${TMUX_REMOTE_CONTROL_TEST_CHANNEL_FAIL:-}" != "1" ]] || exit 255
+  PATH="$TMUX_REMOTE_CONTROL_TEST_FAKE_TMUX_DIR:$PATH" exec /bin/sh -c "$command"
+fi
 if [[ "$command" == *"list-sessions"* ]]; then
   if [[ "${TMUX_REMOTE_CONTROL_TEST_NO_SESSIONS:-}" != "1" ]]; then
     printf '$3\twork\t2\t1\n'
@@ -47,8 +53,18 @@ if [[ "$command" == "tmux resize-pane "* || "$command" == "tmux select-pane "* |
 fi
 printf '%s\n' "$command" >"$TMUX_REMOTE_CONTROL_TEST_COMMAND"
 cat >"$TMUX_REMOTE_CONTROL_TEST_INPUT"
+if [[ -f "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS" ]]; then
+  printf 'submit\n' >>"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+fi
 SH
 chmod +x "$root/bin/ssh"
+
+mkdir -p "$root/fake-tmux"
+cat >"$root/fake-tmux/tmux" <<'SH'
+#!/bin/sh
+printf 'channel: tmux %s\n' "$*" >>"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+SH
+chmod +x "$root/fake-tmux/tmux"
 
 cat >"$root/bin/editor" <<'SH'
 #!/usr/bin/env bash
@@ -78,6 +94,7 @@ export TMUX_REMOTE_CONTROL_TEST_INPUT="$root/input"
 export TMUX_REMOTE_CONTROL_TEST_SSH_ARGS="$root/ssh-args"
 export TMUX_REMOTE_CONTROL_TEST_QUERY_COMMAND="$root/query-command"
 export TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS="$root/navigation-commands"
+export TMUX_REMOTE_CONTROL_TEST_FAKE_TMUX_DIR="$root/fake-tmux"
 
 project_root="$(cd "$(dirname "$0")/.." && pwd)"
 script="$project_root/bin/tmux-remote-control"
@@ -384,38 +401,54 @@ run_in_pty "6f6e652074776f207468726565011b5b313b33431b5b35373432363b33750d"
 run_in_pty "6f6e65207468726565011b5b313b334320666173740d"
 [[ "$(cat "$root/input")" == "one fast three" ]]
 
-# Navigation and zoom shortcuts run remote tmux commands without submitting the
-# draft. CSI-u keeps Ctrl-J and Ctrl-number distinct from Enter and other keys.
+# Navigation and zoom shortcuts run remote tmux commands through the prompt's
+# persistent channel, without submitting the draft or restarting the prompt.
+# CSI-u keeps Ctrl-J and Ctrl-number distinct from Enter and other keys. Enter
+# in the same keystroke batch must wait until navigation has been applied.
 : >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
 while IFS= read -r navigation_key; do
-  printf 'navigation did not return to the prompt' >"$root/input"
-  run_in_pty "6b6565702074686973206472616674${navigation_key}" "0d"
+  printf 'navigation lost the draft' >"$root/input"
+  run_in_pty "6b6565702074686973206472616674${navigation_key}0d"
   [[ "$(cat "$root/input")" == "keep this draft" ]]
 done < <(python3 - <<'PY'
 for key in "fhjklpn0123456789":
     print(f"\x1b[{ord(key)};5u".encode().hex())
 PY
 )
-cat >"$root/expected-navigation-commands" <<'EOF'
-tmux resize-pane -Z -t '$3'
-tmux select-pane -t '$3' -D
-tmux select-pane -t '$3' -L
-tmux select-pane -t '$3' -R
-tmux select-pane -t '$3' -U
-tmux select-window -t '$3' -p
-tmux select-window -t '$3' -n
-tmux select-window -t '$3:0'
-tmux select-window -t '$3:1'
-tmux select-window -t '$3:2'
-tmux select-window -t '$3:3'
-tmux select-window -t '$3:4'
-tmux select-window -t '$3:5'
-tmux select-window -t '$3:6'
-tmux select-window -t '$3:7'
-tmux select-window -t '$3:8'
-tmux select-window -t '$3:9'
-EOF
+{
+  printf 'channel: tmux %s\nsubmit\n' \
+    'resize-pane -Z -t $3' \
+    'select-pane -t $3 -D' \
+    'select-pane -t $3 -L' \
+    'select-pane -t $3 -R' \
+    'select-pane -t $3 -U' \
+    'select-window -t $3 -p' \
+    'select-window -t $3 -n'
+  for index in 0 1 2 3 4 5 6 7 8 9; do
+    printf 'channel: tmux select-window -t $3:%s\nsubmit\n' "$index"
+  done
+} >"$root/expected-navigation-commands"
 diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+
+# Kitty key releases match the same shortcut. They must not navigate again.
+# Ctrl-N press, release, press, release, then text and Enter:
+: >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+run_in_pty "1b5b3131303b35751b5b3131303b353a33751b5b3131303b35751b5b3131303b353a337574776963650d"
+[[ "$(cat "$root/input")" == "twice" ]]
+printf 'channel: tmux select-window -t $3 -n\nchannel: tmux select-window -t $3 -n\nsubmit\n' \
+  >"$root/expected-navigation-commands"
+diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+
+# If the channel cannot start, for example because SSH would need a password,
+# the prompt hands queued keys to the interactive SSH path, still in order.
+: >"$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+TMUX_REMOTE_CONTROL_TEST_CHANNEL_FAIL=1 \
+  run_in_pty "6b65657020746869732064726166741b5b3131303b35751b5b3131323b35750d"
+[[ "$(cat "$root/input")" == "keep this draft" ]]
+printf "tmux select-window -t '\$3' -n\ntmux select-window -t '\$3' -p\nsubmit\n" \
+  >"$root/expected-navigation-commands"
+diff -u "$root/expected-navigation-commands" "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
+rm -f "$TMUX_REMOTE_CONTROL_TEST_NAVIGATION_COMMANDS"
 
 list_output="$("$script" attach example-host --list)"
 [[ "$list_output" == *'$3'* ]]
@@ -516,6 +549,48 @@ SH
     echo "submission buffer was not removed" >&2
     exit 1
   fi
+
+  # Ctrl-N goes through the real persistent channel command and tmux. Enter
+  # in the same keystroke batch must reach the newly selected window.
+  tmux -L "$test_tmux_socket" new-window -d -t "test session:" -n nav-a \
+    /bin/sh -c "IFS= read -r line; printf '%s' \"\$line\" >'$root/pane-nav-a'"
+  tmux -L "$test_tmux_socket" new-window -d -t "test session:" -n nav-b \
+    /bin/sh -c "IFS= read -r line; printf '%s' \"\$line\" >'$root/pane-nav-b'"
+  tmux -L "$test_tmux_socket" select-window -t "test session:nav-a"
+  TMUX="$socket_path,0,0" python3 - "$script" <<'PY'
+import os, pty, select, sys, time
+pid, fd = pty.fork()
+if pid == 0:
+    os.execv(sys.argv[1], [sys.argv[1], "attach", "example-host", "test session", "--once"])
+output = bytearray()
+sent = False
+deadline = time.monotonic() + 10
+while time.monotonic() < deadline:
+    if select.select([fd], [], [], 0.05)[0]:
+        try:
+            output.extend(os.read(fd, 65536))
+        except OSError:
+            pass
+    if not sent and "› ".encode() in output:
+        os.write(fd, b"\x1b[110;5unav-followed\r")
+        sent = True
+    child, status = os.waitpid(pid, os.WNOHANG)
+    if child:
+        if os.waitstatus_to_exitcode(status) != 0:
+            sys.stderr.buffer.write(output)
+            raise SystemExit("real tmux navigation controller failed")
+        break
+else:
+    os.kill(pid, 9)
+    sys.stderr.buffer.write(output)
+    raise SystemExit("timed out in real tmux navigation")
+PY
+  for _ in {1..50}; do
+    [[ -f "$root/pane-nav-b" ]] && break
+    sleep 0.05
+  done
+  [[ ! -e "$root/pane-nav-a" ]]
+  [[ "$(cat "$root/pane-nav-b")" == "nav-followed" ]]
 
   tmux -L "$test_tmux_socket" kill-server 2>/dev/null || true
   test_tmux_socket=""

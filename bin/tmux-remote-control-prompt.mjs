@@ -5,16 +5,28 @@ import {
   Key,
   ProcessTerminal,
   TuiMainScreen,
+  isKeyRelease,
   matchesKey,
   truncateToWidth,
 } from "@earendil-works/pi-tui";
 import { HistoryInput, isHistoryShortcut } from "./history-input.mjs";
 import { getHistoryDirectory, loadHistory } from "./history-store.mjs";
+import { NavigationChannel } from "./navigation-channel.mjs";
 
-const [draftPath, actionPath, controllerHost, controllerTarget, controllerSession, statePath] = process.argv.slice(2);
+const [
+  draftPath,
+  actionPath,
+  controllerHost,
+  controllerTarget,
+  controllerSession,
+  statePath,
+  controlPath,
+  navigationSessionId,
+] = process.argv.slice(2);
 if (!draftPath || !actionPath || !controllerHost || !controllerTarget) {
   process.stderr.write(
-    "Usage: tmux-remote-control-prompt DRAFT_FILE ACTION_FILE CONTROLLER_HOST CONTROLLER_TARGET\n",
+    "Usage: tmux-remote-control-prompt DRAFT_FILE ACTION_FILE CONTROLLER_HOST CONTROLLER_TARGET " +
+      "[SESSION_NAME STATE_FILE CONTROL_PATH SESSION_ID]\n",
   );
   process.exit(2);
 }
@@ -73,13 +85,38 @@ class ControllerPrompt {
   }
 }
 
-function finish(action) {
+const bell = () => process.stdout.write("\x07");
+
+// Navigation keys go through one persistent SSH channel without leaving this
+// prompt. Fixed-pane mode has no session to navigate. Without a control path
+// (for example, when this helper runs on its own), bash handles every key.
+const navigation =
+  navigationSessionId && controlPath
+    ? new NavigationChannel({
+        host: controllerHost,
+        sessionId: navigationSessionId,
+        sshOptions: ["-o", "ControlMaster=auto", "-o", "ControlPersist=10m", "-o", `ControlPath=${controlPath}`],
+        onFailure: bell,
+        // The channel could not start, so no queued key reached the remote
+        // shell. Let bash run them in order through interactive SSH instead.
+        onFallback: (queued) => finish(queued.at(-1), queued.slice(0, -1)),
+      })
+    : undefined;
+
+async function finish(action, leadingActions = []) {
   if (finished) return;
   finished = true;
+  // Stop reading first, so keys typed while navigation drains stay in the
+  // terminal buffer for the next prompt instead of being discarded here.
+  tui.stop();
+  // Apply earlier navigation before a submission or editor action can use
+  // the focused pane. Unsent keys are passed to bash, in order.
+  const unsent = navigation ? await navigation.drain() : [];
+  navigation?.close();
   writeFileSync(draftPath, input.getValue());
   if (statePath) writeFileSync(statePath, JSON.stringify(input.getState()));
-  writeFileSync(actionPath, `${action}\n`);
-  tui.stop();
+  const actions = [...leadingActions, ...unsent, action];
+  writeFileSync(actionPath, actions.map((name) => `${name}\n`).join(""));
 }
 
 const actions = [
@@ -100,6 +137,9 @@ tui.addChild(new ControllerPrompt(input));
 tui.setFocus(input);
 tui.addInputListener((data) => {
   if (finished) return { consume: true };
+  // Kitty key releases match the same shortcuts as presses. The TUI already
+  // drops them before the editor; never let them repeat a controller action.
+  if (isKeyRelease(data)) return undefined;
   if (isHistoryShortcut(data, input.getValue())) {
     finish("history");
     return { consume: true };
@@ -121,7 +161,9 @@ tui.addInputListener((data) => {
   }
   for (const [key, action] of actions) {
     if (matchesKey(data, key)) {
-      finish(action);
+      if (navigation && action !== "editor") navigation.send(action);
+      else if (action !== "editor" && controlPath && !navigationSessionId) bell();
+      else finish(action);
       return { consume: true };
     }
   }
@@ -131,9 +173,12 @@ tui.addInputListener((data) => {
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   process.on(signal, () => {
     if (!finished) tui.stop();
+    navigation?.close();
     process.exit(128 + (signal === "SIGHUP" ? 1 : signal === "SIGINT" ? 2 : 15));
   });
 }
 
 terminal.clearScreen();
 tui.start();
+// Open the channel now so it is usually ready before the first navigation key.
+navigation?.start();
