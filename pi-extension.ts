@@ -19,6 +19,10 @@ class RemoteControlEditor extends CustomEditor {
 		if (width <= 0) return [""];
 		const hasText = this.getText() !== "";
 		const color = (text: string) => this.colorBorder(hasText, text);
+		// Pi's fullscreen input dock reserves at least three editor rows and pads
+		// shorter renders with blank rows, so collapsing there saves no space.
+		// Check per render because Pi can switch renderers at runtime.
+		const collapse = !hasText && this.tui.mode !== "fullscreen";
 
 		// Let Pi handle text layout, cursor, scroll indicators, and autocomplete.
 		// Color its borders during this render only; Pi may update borderColor
@@ -38,13 +42,13 @@ class RemoteControlEditor extends CustomEditor {
 		const rule = truncateToWidth(lines[0], remaining, "");
 		// Anchor IME/hardware cursor positioning to the collapsed row, without
 		// drawing a fake text cursor. Expanded text keeps Pi's original cursor.
-		const marker = !hasText && this.focused ? CURSOR_MARKER : "";
+		const marker = collapse && this.focused ? CURSOR_MARKER : "";
 		lines[0] = remaining > 0 ? color(prefix) + marker + rule : marker + color(prefix);
 
 		// An empty editor has a top border, one input row, and a bottom border.
 		// Remove the latter two, but keep any autocomplete rows below them.
 		// All decoration is display-only, never editable or submitted text.
-		return hasText ? lines : [lines[0], ...lines.slice(3)];
+		return collapse ? [lines[0], ...lines.slice(3)] : lines;
 	}
 }
 

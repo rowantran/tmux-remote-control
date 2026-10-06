@@ -22,9 +22,9 @@ const accent = text => `\x1b[36m${text}\x1b[39m`;
 const warning = text => `\x1b[33m${text}\x1b[39m`;
 const plain = lines => lines.map(stripTerminalSequences);
 
-async function setup(initialText = "", { activate = true } = {}) {
+async function setup(initialText = "", { activate = true, mode = "regular" } = {}) {
   let toggle, sessionStart, resourcesDiscover, execCalls = 0;
-  const tui = { terminal: { rows: 24 }, requestRender() {} };
+  const tui = { mode, terminal: { rows: 24 }, requestRender() {} };
   const identity = text => text;
   const theme = {
     borderColor: text => `\x1b[34m${text}\x1b[0m`,
@@ -126,6 +126,21 @@ test("empty editor collapses to one accent-colored line without changing input",
   assert.equal(editor.getExpandedText(), "");
   assert.deepEqual(editor.getCursor(), { line: 0, col: 0 });
   assert.deepEqual(changes, []);
+});
+
+test("fullscreen keeps the empty editor's reserved rows instead of padding blank lines", async () => {
+  const { editor, baseline } = await setup("", { mode: "fullscreen" });
+  baseline.setText("");
+  const lines = editor.render(40);
+  const normal = baseline.render(40);
+  assert.equal(lines.length, 3, "Pi's fullscreen dock reserves three editor rows");
+  assert.equal(stripTerminalSequences(lines[0]), "📡 " + "─".repeat(37));
+  assert.ok(lines[0].includes(accent("📡 ")));
+  assert.ok(!lines[0].includes(CURSOR_MARKER));
+  assert.deepEqual(plain(lines.slice(1)), plain(normal.slice(1)));
+  assert.equal(lines.filter(line => line.includes(CURSOR_MARKER)).length, 1);
+  editor.setText("hello");
+  assertExpanded(editor, baseline, 40);
 });
 
 test("any entered text expands with warning borders and the text-entered label", async () => {
